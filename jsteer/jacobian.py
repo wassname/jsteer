@@ -226,6 +226,13 @@ class Jacobian:
                     " ".join(f"{l}:{per_layer[l].norm():.3g}" for l in cfg.layers))
         return _to_vector(cfg, per_layer)
 
+    def steer_band(self, model, *, lo: float = 0.3, hi: float = 0.9) -> tuple[int, ...]:
+        """Fitted layers within the [lo, hi] fraction of model depth. The authors'
+        pre-fitted lenses span EVERY layer; steering all of them at once over-drives
+        the residual, so restrict to the mid-depth band run-524 used."""
+        n = model.config.num_hidden_layers
+        return tuple(l for l in self.lens.source_layers if lo <= l / n <= hi)
+
     def _steer_layers(self, layers) -> tuple[int, ...]:
         """None -> all fitted layers; else explicit int indices (float bands are
         a fit-time concept -- the lens doesn't know n_layers to resolve them)."""
@@ -297,13 +304,22 @@ class Jacobian:
     # -- bonus: the lens's native forward readout --------------------------------
 
     def lens_topk(self, model, tok, prompt: str, layer: int, *, k: int = 10,
-                  position: int = -1) -> list[tuple[str, float]]:
+                  position: int = -1, mask_wordlike: bool = True) -> list[tuple[str, float]]:
         """Lens readout at `layer`: transport the residual to the final basis
         with J_l and decode to tokens (a linear approximation, not the literal
-        computation). jlens's native use, handy in demos."""
+        computation). jlens's native use, handy in demos.
+
+        `mask_wordlike` reuses jlens's own word-like vocab mask so the readout
+        hides punctuation/single-char/special tokens (which, per the walkthrough,
+        trail the interesting word tokens on Qwen); ranks are unaffected."""
+        from jlens.vis import _meaningful_token_mask
         lm = from_hf(model, tok)
         lens_logits, _, _ = self.lens.apply(lm, prompt, layers=[layer],
                                             positions=[position])
-        top = lens_logits[layer][0].topk(k)
+        logits = lens_logits[layer][0]
+        if mask_wordlike:
+            wl = _meaningful_token_mask(tok, logits.shape[-1], logits.device)
+            logits = logits.masked_fill(~wl, float("-inf"))
+        top = logits.topk(k)
         return [(tok.decode([i]), float(v)) for i, v in
                 zip(top.indices.tolist(), top.values.tolist())]

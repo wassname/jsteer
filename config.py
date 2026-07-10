@@ -26,6 +26,27 @@ ART = ROOT / "artifacts"
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
 
+# The authors publish pre-fitted Jacobian lenses on the Hub (raw Salesforce-
+# wikitext, n=1000 where the _n1000 suffix is present). Loading one beats fitting
+# locally: identical estimator, 1000 prompts, zero compute. Keyed by HF model id;
+# see github.com/anthropics/jacobian-lens walkthrough.ipynb.
+LENS_REPO = "neuronpedia/jacobian-lens"
+LENS_REVISION = "qwen-n1000"
+HUB_LENS_FILE = {
+    "Qwen/Qwen3.5-4B": "qwen3.5-4b/jlens/Salesforce-wikitext/Qwen3.5-4B_jacobian_lens_n1000.pt",
+    "Qwen/Qwen3.6-27B": "qwen3.6-27b/jlens/Salesforce-wikitext/Qwen3.6-27B_jacobian_lens_n1000.pt",
+    "Qwen/Qwen3-4B": "qwen3-4b/jlens/Salesforce-wikitext/Qwen3-4B_jacobian_lens.pt",
+    "Qwen/Qwen3-8B": "qwen3-8b/jlens/Salesforce-wikitext/Qwen3-8B_jacobian_lens.pt",
+    "Qwen/Qwen3-14B": "qwen3-14b/jlens/Salesforce-wikitext/Qwen3-14B_jacobian_lens.pt",
+    "Qwen/Qwen3-32B": "qwen3-32b/jlens/Salesforce-wikitext/Qwen3-32B_jacobian_lens.pt",
+}
+
+
+def hub_lens_file(model_name: str) -> str:
+    """Filename of the authors' pre-fitted lens for `model_name` inside LENS_REPO.
+    KeyError (fail fast) if they don't publish one -- then fit locally via fit.py."""
+    return HUB_LENS_FILE[model_name]
+
 
 def chat_corpus(tok, n_prompts: int) -> list[str]:
     """jlens's WikiText prompts wrapped in the chat template. Fitting on chat-
