@@ -14,9 +14,9 @@ via one backward, a vector-Jacobian product). The `extract` entries here are
 stubs that say so.
 
 DELIVERY of v to the residual stream is decoupled from extraction: the same v
-can be added everywhere, gated to the last positions, or overwrite a span.
-`cfg.apply_mode` selects the mode; adding a mode = one function + one
-APPLY_REGISTRY entry.
+can be added everywhere, clamped to a target component, gated to the last
+positions, or overwrite a span. `cfg.apply_mode` selects the mode; adding a
+mode = one function + one APPLY_REGISTRY entry.
 
 Protocol (steering-lite config.py Method.apply):
     apply(mod, x, y, shared, stacked, cfg) -> y_new   # same shape [b, s, d]
@@ -109,6 +109,19 @@ def apply_add_last(mod, x, y, shared, stacked, cfg) -> Tensor:
     return torch.cat([head, tail], dim=1)
 
 
+def apply_clamp(mod, x, y, shared, stacked, cfg) -> Tensor:
+    """Set y's component along v_hat to coeff at ALL positions:
+    y += (coeff - <y, v_hat>) * v_hat. Unlike apply_add the perturbation stays
+    bounded however long generation runs: each decode step re-targets the same
+    component value instead of pushing again on top of the previous push (the
+    compounding that degenerates high-|C| adds via the KV cache). coeff=0 is
+    directional ablation (Arditi et al. 2024); -C reverses the component."""
+    v = _v_sum(stacked, y)
+    v_hat = v / (v.norm() + ε)
+    comp = torch.einsum("bsd,d->bs", y, v_hat).unsqueeze(-1)   # [b, s, 1]
+    return y + (cfg.coeff - comp) * v_hat
+
+
 def apply_replace_last(mod, x, y, shared, stacked, cfg) -> Tensor:
     """Overwrite the last k positions with the concept direction at each
     position's original magnitude: energy from y, direction from v, strength
@@ -126,6 +139,7 @@ def apply_replace_last(mod, x, y, shared, stacked, cfg) -> Tensor:
 
 APPLY_REGISTRY: dict[str, Callable[..., Tensor]] = {
     "add": apply_add,
+    "clamp": apply_clamp,
     "add_last": apply_add_last,
     "replace_last": apply_replace_last,
 }

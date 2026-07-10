@@ -77,18 +77,22 @@ def main() -> None:
     _show_tokens(tok, GEN_PROMPT, "GEN PROMPT")
     enc = tok(GEN_PROMPT, return_tensors="pt").to(DEVICE)
 
-    for C in (-8, 0, 8):
-        with v(model, C=C):
-            out = model.generate(**enc, max_new_tokens=40, do_sample=False,
-                                 pad_token_id=tok.eos_token_id)
-        text = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=True)
-        logger.info(f"=== C={C:+d} generation ===\n{text!r}")
+    for mode in ("add", "clamp"):
+        v.cfg.apply_mode = mode
+        for C in (-8, 0, 8, 20):
+            with v(model, C=C):
+                out = model.generate(**enc, max_new_tokens=40, do_sample=False,
+                                     pad_token_id=tok.eos_token_id)
+            text = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=True)
+            logger.info(f"=== {mode} C={C:+d} generation ===\n{text!r}")
 
     logger.info(
         "SHOULD: C=+8 mentions happiness/joy more than C=0; C=-8 less or "
-        "negative tone. ELSE steering wiring or sign issue. All three SHOULD "
-        "stay coherent english; gibberish means the coeff is too large or the "
-        "vector is malformed.")
+        "negative tone. ELSE steering wiring or sign issue. add C=+20 MAY "
+        "degenerate (unbounded accumulation); clamp C=+20 SHOULD stay more "
+        "coherent (component pinned, perturbation bounded). clamp C=0 is "
+        "directional ablation, expect near-baseline text. Gibberish at small "
+        "|C| means the vector is malformed.")
 
 
 if __name__ == "__main__":
