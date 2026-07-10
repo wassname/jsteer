@@ -9,6 +9,17 @@ template -- see chat_corpus for why.
 from pathlib import Path
 
 import torch
+from loguru import logger
+from tqdm.auto import tqdm
+
+# Configure loguru once, on import, so every script/notebook that imports config
+# gets the same compact format. Routed through tqdm.write so log lines don't
+# break a live progress bar (e.g. the fit bar).
+logger.remove()
+logger.add(lambda m: tqdm.write(m, end=""), colorize=True,
+           format="<level>{level.icon}</level> {message}", level="INFO")
+for _lvl, _icon in (("INFO", "I"), ("WARNING", "W"), ("ERROR", "E"), ("DEBUG", "D")):
+    logger.level(_lvl, icon=_icon)
 
 ROOT = Path(__file__).resolve().parent
 ART = ROOT / "artifacts"

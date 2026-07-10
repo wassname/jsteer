@@ -49,7 +49,10 @@ def main() -> None:
                               layers=tuple(args.layers), dim_batch=args.dim_batch,
                               max_seq_len=args.max_seq_len,
                               checkpoint_path=str(config.cache_path(args.model, "ckpt")))
-    logger.info(f"{jac!r} -> {out}  ({(time.monotonic() - t0) / 60:.1f} min)")
+    # BLUF summary: what to read first.
+    logger.info(f"DONE fit -> {out}")
+    logger.info(f"     {jac!r}  |  {args.n_prompts} prompts, dim_batch={args.dim_batch}, "
+                f"{(time.monotonic() - t0) / 60:.1f} min")
 
 
 if __name__ == "__main__":

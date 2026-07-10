@@ -151,10 +151,25 @@ class Jacobian:
         makes the fit resumable (atomic writes)."""
         lm = from_hf(model, tok, compile=compile)
         source_layers = _resolve_layers(layers, lm.n_layers)
-        lens = _jlens_fit(lm, prompts, source_layers=source_layers,
+
+        # Full trace of the first fit prompt as jlens sees it (special tokens on).
+        # SHOULD: a chat fit opens with the template's <|im_start|>user and ends at
+        # the assistant/<think> start; plain text means the template was skipped.
+        ids0 = tok(prompts[0], add_special_tokens=True).input_ids
+        logger.info(f"fit on {len(prompts)} prompts, layers={source_layers} "
+                    f"(dim_batch={dim_batch}, max_seq_len={max_seq_len})")
+        logger.info(f"FIT PROMPT[0] ({len(ids0)} tok): {tok.decode(ids0)!r}")
+
+        # jlens.fit has no progress bar; wrap prompts so we get one (fit consumes
+        # them only via enumerate/len, so this is safe). Both tqdm intervals set
+        # (token-efficient-logging) to avoid CR-spam in non-tty logs.
+        bar = tqdm(prompts, desc="fit J", mininterval=30, maxinterval=30)
+        lens = _jlens_fit(lm, bar, source_layers=source_layers,
                           dim_batch=dim_batch, max_seq_len=max_seq_len,
                           checkpoint_path=checkpoint_path)
-        return cls(lens=lens)
+        jac = cls(lens=lens)
+        logger.info(f"fit done: {jac!r}")
+        return jac
 
     def save(self, path: str) -> None:
         self.lens.save(path)      # fp16 by default; jlens-compatible file
