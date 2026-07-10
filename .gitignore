@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.egg-info/
+artifacts/*.jac
+artifacts/*.ckpt
+uv.lock
