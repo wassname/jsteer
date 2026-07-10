@@ -69,6 +69,29 @@ concentrated direction, so its knee is steep: C~0.5 moves the tone while the tex
 and reasoning stay fluent, and by C~1 it degenerates into token spam.
 `nbs/word_steering.ipynb` shows the full sweep with the j-space and `<think>` views.
 
+## Persona j-thoughts (experimental)
+
+Instead of naming words, contrast two personas: `persona_topk_vector` reads the
+tokens their final-layer means evoke *differently*. Contrasting the logits before
+the top-k is what makes it work; both persona means unembed to the same generic
+tokens (`\n`, ` the`, ` I`), so the signal lives only in the difference.
+
+```python
+optimist  = ["Things usually work out better than people expect.", ...]
+pessimist = ["Things usually go worse than people expect.", ...]
+v = jac.persona_topk_vector(model, tok, optimist, pessimist, layers=band)
+# logs the contrastive "mental workspace":
+#   j-thoughts (content of mental workspace, top-8)
+#       positive: [' ❤', '😊', ' happy', '✨', ' Happy', ' 🙂', ' grat', ' favorite']
+#       negative: [' Worse', '绝望', ' Panic', ' useless', ' Worst', ' worse', '无力', ' panic']
+show_steer(jac, model, tok, v, "How is the project going?", Cs=(0, 0.5, 1.5))
+```
+
+The extraction is clean, but persona *steering* is unverified: earlier persona
+vectors failed specificity controls (Evidence section below), and this
+contrast-first variant has not been re-tested. Trust `word_vector`; treat this as
+a toy. `nbs/persona_steering.ipynb` runs all three persona variants.
+
 ## API
 
 | call | status | what it does |

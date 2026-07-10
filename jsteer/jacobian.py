@@ -222,8 +222,10 @@ class Jacobian:
         if missing:
             raise ValueError(f"layers {sorted(missing)} not fitted; have {self.layers}")
         per_layer = {l: w @ self.lens.jacobians[l] for l in cfg.layers}
-        logger.info(f"{cfg.method} per-layer |J^T w| (pre-norm): " +
-                    " ".join(f"{l}:{per_layer[l].norm():.3g}" for l in cfg.layers))
+        # per-layer pullback norms before unit-normalizing: a fit-health trace
+        # (flat/near-zero everywhere => the lens didn't pick up this cotangent).
+        logger.debug(f"{cfg.method} per-layer |J^T w| (pre-norm): " +
+                     " ".join(f"{l}:{per_layer[l].norm():.3g}" for l in cfg.layers))
         return _to_vector(cfg, per_layer)
 
     def steer_band(self, model, *, lo: float = 0.3, hi: float = 0.9) -> tuple[int, ...]:
