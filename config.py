@@ -1,10 +1,10 @@
-"""Repo-local paths, slug/cache conventions, and the fit corpus, shared by
-scripts/ and notebooks.
+"""Repo-local paths, slug/cache conventions, and the pre-fitted lens map, shared
+by scripts/ and notebooks.
 
 NOT imported by the jsteer library (which stays path-agnostic so `pip install
-jsteer` never needs a repo root). The corpus content is jlens's own WikiText
-(`load_wikitext_prompts`, not hand-rolled), but wrapped in the model's chat
-template -- see chat_corpus for why.
+jsteer` never needs a repo root). The default demo path LOADS a pre-fitted lens
+(HUB_LENS_FILE, raw Salesforce-wikitext); chat_corpus is only for the local-fit
+fallback (scripts/fit.py) and is an untested alternative to raw -- see its docstring.
 """
 from pathlib import Path
 
@@ -49,10 +49,13 @@ def hub_lens_file(model_name: str) -> str:
 
 
 def chat_corpus(tok, n_prompts: int) -> list[str]:
-    """jlens's WikiText prompts wrapped in the chat template. Fitting on chat-
-    formatted text (not raw documents) puts J closer to the distribution the
-    model steers in; run-524's verified vectors were fit this way too. Called
-    via a lambda in fit_cached, so it only downloads WikiText on a cache miss."""
+    """jlens's WikiText prompts wrapped in the chat template, for the LOCAL-FIT
+    fallback only (the default demo path loads the authors' pre-fitted RAW-wikitext
+    lens). Hypothesis: fitting on chat-formatted text puts J closer to the
+    distribution we steer in; run-524's verified vectors were fit this way, but it
+    was never compared head-to-head with a raw fit, so treat chat-vs-raw as
+    unresolved. Called via a lambda in fit_cached, so WikiText only downloads on a
+    cache miss."""
     from jlens.examples import load_wikitext_prompts
     return [tok.apply_chat_template([{"role": "user", "content": p}],
                                     add_generation_prompt=True, tokenize=False,
