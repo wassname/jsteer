@@ -1,10 +1,12 @@
 """Shared demo display: steer, generate through the chat template, show the
-lens readout + <think> trace + answer per strength C. (Claude)
+lens readout + the raw generation per strength C. (Claude)
 
 Used by all the notebooks so they render steering the same way. The chat
 template matters: these models are trained on user/assistant turns (and
 run-524's verified vectors were extracted on that format), and enable_thinking
-opens Qwen3's <think> block.
+opens Qwen3's <think> block. We print the generation RAW (skip_special_tokens
+=False): the model's own <think>/</think> and <|im_end|> are visible so the
+output is debuggable and nothing is parsed or reconstructed.
 """
 from __future__ import annotations
 
@@ -20,27 +22,15 @@ def chat_input(tok, user_msg: str, *, enable_thinking: bool = True) -> str:
         add_generation_prompt=True, tokenize=False, enable_thinking=enable_thinking)
 
 
-def split_think(text: str) -> tuple[str, str, bool]:
-    """Qwen3 emits `<think>reasoning</think>answer`. Returns (thoughts, answer,
-    closed). closed=False means generation hit the token limit still inside
-    <think>: `answer` is empty and `thoughts` holds the truncated reasoning.
-    Without this flag, unclosed reasoning silently masquerades as the answer."""
-    body = text.replace("<think>", "").strip()
-    if "</think>" in body:
-        thoughts, _, answer = body.partition("</think>")
-        return thoughts.strip(), answer.strip(), True
-    return body, "", False
-
-
 @torch.no_grad()
 def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                Cs=(-6, 0, 6), layer: int | None = None, k: int = 6,
                max_new_tokens: int = 512, seed: int = 0) -> None:
-    """One block per C: lens readout at `layer`, the <think> trace, the answer,
-    all under steering. Uses the model's own generation_config sampling; `seed`
+    """One block per C: lens readout at `layer`, then the raw generation, all
+    under steering. Uses the model's own generation_config sampling; `seed`
     fixes it so the C blocks are comparable. `layer` defaults to the top fitted
     layer. max_new_tokens defaults to 512 so Qwen3's <think> block can close;
-    256 truncates mid-reasoning, leaving no answer."""
+    256 truncates mid-reasoning."""
     layer = jac.layers[-1] if layer is None else layer
     prompt = chat_input(tok, user_msg)
     enc = tok(prompt, return_tensors="pt").to(model.device)
@@ -56,15 +46,10 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
             jtop = jac.lens_topk(model, tok, prompt, layer=layer, k=k)
             out = model.generate(**enc, max_new_tokens=max_new_tokens,
                                  pad_token_id=tok.eos_token_id)
-        thoughts, answer, closed = split_think(
-            tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=True))
+        # raw decode WITH special tokens: real <think>/</think>, <|im_end|> visible,
+        # nothing parsed or re-wrapped -- debuggable exactly as the model emitted it
+        gen = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=False)
         block = [f"\n--- C={C:+g} " + "-" * 60,
-                 f"  lens @L{layer}:  " + " · ".join(t.strip() for t, _ in jtop)]
-        if thoughts:
-            tag = "<think>" if closed else "<think> (UNCLOSED: hit max_new_tokens)"
-            block.append(f"  {tag}\n  {thoughts}\n  </think>")
-        if answer:
-            block.append(f"  answer: {answer}")
-        elif not closed:
-            block.append("  answer: (none -- reasoning truncated; raise max_new_tokens)")
+                 f"  lens @L{layer}:  " + " · ".join(t.strip() for t, _ in jtop),
+                 gen]
         logger.info("\n".join(block) + "\n")
