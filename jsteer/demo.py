@@ -33,11 +33,48 @@ def _cthulhu_say(text: str) -> str:
                        "   \\", "    ^(;,;)^"]))
 
 
+# think-then-answer rubric read: the demo's one-number sanity signal that steering
+# moved the target axis. Same mechanism as moral-maps guided.py (let the model
+# think, then read the logprobs at a JSON answer slot), reduced to a single scalar.
+_ANS_FMT = (' Think it over, then answer with JSON {"ans": N} where N is a single'
+            ' digit from 0 (least) to 9 (most).')
+
+
+@torch.no_grad()
+def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int
+                 ) -> tuple[float, float]:
+    """Ask `rubric`, let the model think, then FORCE the answer slot `{"ans": ` and
+    read the logprob-weighted expected digit 0-9 there. Returns (expected, pmass).
+
+    expected = sum_d d * softmax(logit_d over the 10 digit tokens) -- a continuous
+    scalar from single-token logprobs (cleaner than parsing a multi-token float).
+    pmass = full-vocab softmax mass on the 10 digit tokens: a coherence guard, ~0
+    means the slot isn't a digit (prefix/tokenizer mismatch), so distrust expected.
+    The rigorous K-way, position-debiased version is moral-maps guided.py; this is
+    the demo's cheap readout, scored under whatever steering is active."""
+    prompt = chat_input(tok, rubric + _ANS_FMT)
+    enc = tok(prompt, return_tensors="pt").to(model.device)
+    torch.manual_seed(seed)
+    out = model.generate(**enc, max_new_tokens=max_new_tokens,
+                         pad_token_id=tok.eos_token_id)
+    think = tok.decode(out[0][enc.input_ids.shape[1]:],
+                       skip_special_tokens=False).split("</think>")[0]
+    forced = prompt + think + '</think>\n{"ans": '            # our own deterministic slot
+    fenc = tok(forced, return_tensors="pt").to(model.device)
+    logits = model(**fenc).logits[0, -1].float()
+    ids = torch.tensor([tok(str(d), add_special_tokens=False).input_ids[0]
+                        for d in range(10)], device=logits.device)
+    expected = float((logits[ids].softmax(0) * torch.arange(10., device=ids.device)).sum())
+    pmass = float(logits.softmax(0)[ids].sum())
+    return expected, pmass
+
+
 @torch.no_grad()
 def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                Cs=(-6, 0, 6), layer: int | None = None, k: int = 6,
                max_new_tokens: int = 512, seed: int = 0,
-               apply_mode: str | None = None, apply_span: int = 1) -> None:
+               apply_mode: str | None = None, apply_span: int = 1,
+               rubric: str | None = None) -> None:
     """One block per C: lens readout at `layer`, then the raw generation, all
     under steering. Uses the model's own generation_config sampling; `seed`
     fixes it so the C blocks are comparable. `layer` defaults to the top fitted
@@ -48,7 +85,12 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
     (add | clamp | add_last | replace_last) to swap how v hits the residual
     without re-extracting; `apply_span` is the trailing-position width for the
     last/replace modes. Coefficient units differ by mode (clamp sets a component
-    VALUE, add scales a direction), so each mode wants its own Cs."""
+    VALUE, add scales a direction), so each mode wants its own Cs.
+
+    Pass `rubric` (a 0-9 rating question about the steered axis) to add the
+    quantitative readout: per C, the model thinks then answers `{"ans": N}` and we
+    report the logprob-weighted expected digit. It SHOULD rise with +C and fall
+    with -C; flat means the steer isn't moving that axis (see rubric_score)."""
     if apply_mode is not None:
         vec = Vector(dataclasses.replace(vec.cfg, apply_mode=apply_mode,
                                          apply_span=apply_span), vec.shared, vec.stacked)
@@ -72,10 +114,16 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
             jtop = jac.lens_topk(model, tok, prompt, layer=layer, k=k)
             out = model.generate(**enc, max_new_tokens=max_new_tokens,
                                  pad_token_id=tok.eos_token_id)
+            ans = (rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens,
+                                seed=seed) if rubric is not None else None)
         # raw decode WITH special tokens: real <think>/</think>, <|im_end|> visible,
         # nothing parsed or re-wrapped -- debuggable exactly as the model emitted it
         gen = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=False)
         readout = " · ".join(t.strip() for t, _ in jtop)
         block = [f"\n--- C={C:+g} " + "-" * 60,
                  f"  lens @L{layer}:", _cthulhu_say(readout), gen]
+        if ans is not None:
+            # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
+            # pmass<~0.5 => answer slot isn't a digit, distrust the number.
+            block.append(f"  rubric ans≈{ans[0]:.2f}/9  (pmass={ans[1]:.2f})")
         logger.info("\n".join(block) + "\n")
