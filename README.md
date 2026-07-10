@@ -23,9 +23,11 @@ row). By linearity the cached pullback equals the direct per-prompt VJP
 uv sync
 ```
 
-Note: `[tool.uv.sources]` currently points at local editable checkouts of
-jlens and steering-lite (see pyproject.toml for the paths); adjust if your
-checkouts live elsewhere.
+Note: `[tool.uv.sources]` points at local editable checkouts (see
+pyproject.toml for the paths). steering-lite is public on GitHub. jlens is
+NOT publicly fetchable at the time of writing; this repo depends on the copy
+vendored in the j-steer-dev experiment repo, so without that checkout you
+cannot install jsteer yet.
 
 ## Hello world
 
@@ -69,7 +71,7 @@ spam. `notebooks/word_steering.ipynb` shows the sweep.
 | `jac.word_vector(model, tok, words)` | verified | pull the words' unembedding direction back; +C says them more |
 | `jac.persona_vector(model, tok, pos, neg)` | experimental | pull back the personas' final-layer activation contrast |
 | `jac.persona_topk_vector(model, tok, pos, neg, k=8)` | experimental | persona → top-k evoked tokens → word pullback |
-| `jac.random_vector(seed=0)` | control | norm-matched random direction; honest demos beat this |
+| `jac.random_vector(seed=0)` | control | norm-matched random direction, the baseline a concept vector has to beat |
 | `jac.lens_topk(model, tok, prompt, layer)` | bonus | decode what the model "thinks" at a layer (full-J only) |
 
 Vectors are plain `steering_lite.Vector` objects: `v.save(path)` /
@@ -87,14 +89,14 @@ whole evidence base; treat other models and concepts as untested.
 
 The persona variants failed specificity controls in the same experiments:
 they steer generations, but no more selectively than an unrelated persona's
-vector. They are shipped for experimentation, not as a recommendation
+vector. They are shipped for experimentation only
 (`notebooks/persona_steering.ipynb` keeps this framing and includes a
 mean_diff baseline).
 
 ## Credits
 
 - [jlens](../j-steer-dev/docs/vendor/jacobian-lens): the Jacobian estimator
-  and cache format (the researchers' verified code, wrapped, never
+  and cache format, by the jacobian-lens authors (wrapped, never
   reimplemented).
 - [steering-lite](https://github.com/wassname/steering-lite): the runtime
   (`Vector`, attach/detach hooks, calibration).
