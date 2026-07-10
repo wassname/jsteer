@@ -31,15 +31,17 @@ model = AutoModelForCausalLM.from_pretrained(
     meta["model"], torch_dtype=torch.bfloat16).to("cuda").eval()
 
 t0 = time.time()
-# dim_batch 16 -> 8 (Claude): run 551 was OOM-killed at n_done=36 when the
-# user's VS Code Jupyter kernel (jsteer venv) co-loaded ~1.5GB VRAM + 1.9GB RAM
-# while this fit sat at the 22.4/24.6GB ceiling -- clean SIGKILL, no CUDA
-# traceback = host OOM killer, not a CUDA OOM. dim_batch=8 halves this fit's
-# peak footprint to coexist with the kernel. It only changes the backward
-# SCHEDULE (2x passes), NOT the accumulated Jacobian, so U4 exactness holds.
-# Resumes from the existing checkpoint (n_done=36), lossless.
+# dim_batch 16 -> 4 (Claude): two OOMs vs the user's live VS Code GPU kernel.
+#   551 host-OOM-killed at n_done=36 (kernel ~1.5GB); 552 CUDA-OOM at n_done=45
+#   once the kernel grew to 8.18GB and this fit's 13.23GB hit the 23.5GB ceiling
+#   with only 44MB free (fragmentation ate the last margin). dim_batch=4 drops
+#   this fit to ~10.5GB so it is a polite co-tenant (leaves the user ~13GB); run
+#   under PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (the OOM's own
+#   suggestion) to defragment. dim_batch changes only the backward SCHEDULE
+#   (4x passes), NOT the accumulated Jacobian, so U4 exactness holds. Resumes
+#   from the checkpoint (n_done=45), lossless.
 jac = Jacobian.fit(model, tok, meta["prompts"], layers=meta["layers"],
-                   dim_batch=8, max_seq_len=384,
+                   dim_batch=4, max_seq_len=384,
                    checkpoint_path=str(ART / "qwen3-4b-authority.ckpt"))
 logger.info(f"fit wall-time: {(time.time() - t0) / 3600:.2f} h")
 jac.save(str(ART / "qwen3-4b-authority.jac"))
