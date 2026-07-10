@@ -19,8 +19,8 @@ build `w`:
 
     word_vector           w = mean unembedding row of the words     VERIFIED
     persona_vector        w = h_bar(pos) - h_bar(neg)               EXPERIMENTAL*
-    persona_topk_vector   w = contrast of the top-k tokens each     EXPERIMENTAL
-                          persona evokes at the final layer
+    persona_topk_vector   w = top-k tokens of the pos-neg logit      EXPERIMENTAL
+                          contrast (differ before top-k, else null)
 
     * persona-contrast vectors FAILED specificity controls in j-steer-dev
       (moved the target axis no more than an unrelated persona did). Shipped
@@ -269,28 +269,34 @@ class Jacobian:
     def persona_topk_vector(self, model, tok, pos_prompts: list[str],
                             neg_prompts: list[str], *, k: int = 8, layers=None,
                             batch_size: int = 8) -> Vector:
-        """EXPERIMENTAL: persona -> vocabulary bottleneck -> word pullback.
-        Read each persona's final-layer mean through the unembedding, take the
-        top-k tokens it most evokes, contrast the two token sets' unembedding
-        rows, pull that back. Composes the persona signal with the verified
-        word mechanism; untested for specificity."""
+        """EXPERIMENTAL: persona CONTRAST -> vocabulary bottleneck -> word pullback.
+        Unembed each persona's final-layer mean, take the DIFFERENCE of the two
+        logit vectors, and read the top-k tokens pos evokes more than neg (and
+        vice versa). Contrasting BEFORE top-k is essential: both persona means
+        unembed to the same generic high-frequency tokens (\\n, ' I', ' The'),
+        so top-k of each separately gives a near-null contrast -- the persona
+        signal is only in the difference. Then contrast those two token sets'
+        unembedding rows and pull that back. Composes the persona signal with
+        the verified word mechanism; untested for specificity."""
         lm = from_hf(model, tok)
         h_pos = _h_bar_final(model, tok, pos_prompts, batch_size=batch_size, label="pos")
         h_neg = _h_bar_final(model, tok, neg_prompts, batch_size=batch_size, label="neg")
         W_U = model.lm_head.weight                                # [vocab, d]
-        cots = {}
-        for name, h in (("pos", h_pos), ("neg", h_neg)):
-            logits = lm.unembed(h.to(model.device).to(model.dtype)).float()
-            top = logits.topk(k)
-            toks = [tok.decode([i]) for i in top.indices.tolist()]
-            logger.info(f"persona_topk {name} top-{k}: {toks}")   # read your data:
-            # gibberish/punctuation here means the persona mean is off-manifold.
-            # Asymmetry is intentional: token SELECTION goes through the full
-            # logit pipeline (final norm) above, but the cotangent uses raw W_U
-            # rows to match _word_cotangent's convention.
-            cots[name] = W_U[top.indices].float().mean(0).cpu()
+        # token SELECTION goes through the full logit pipeline (final norm);
+        # the cotangent below uses raw W_U rows to match _word_cotangent.
+        logits_pos = lm.unembed(h_pos.to(model.device).to(model.dtype)).float()
+        logits_neg = lm.unembed(h_neg.to(model.device).to(model.dtype)).float()
+        diff = logits_pos - logits_neg                           # [vocab]
+        top_pos = diff.topk(k)                                    # pos evokes > neg
+        top_neg = (-diff).topk(k)                                 # neg evokes > pos
+        for name, sel in (("pos>neg", top_pos), ("neg>pos", top_neg)):
+            toks = [tok.decode([i]) for i in sel.indices.tolist()]
+            logger.info(f"persona_topk {name} top-{k}: {toks}")  # SHOULD be persona-
+            # specific words now, not generic \n/the; generic here => contrast is null.
+        w = (W_U[top_pos.indices].float().mean(0)
+             - W_U[top_neg.indices].float().mean(0)).cpu()
         cfg = JacobianPersonaTopkC(layers=self._steer_layers(layers))
-        return self.pullback(cots["pos"] - cots["neg"], cfg)
+        return self.pullback(w, cfg)
 
     def random_vector(self, *, seed: int = 0, layers=None) -> Vector:
         """Norm-matched control: unit random direction per layer. Any honest
