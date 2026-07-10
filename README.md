@@ -35,8 +35,8 @@ cannot install jsteer yet.
 ## Hello world
 
 First build the Jacobian cache (any HF model; prompts are jlens's WikiText
-wrapped in the model's chat template, so J is fit at the operating point where
-you steer):
+wrapped in the model's chat template, closer to the distribution you steer in
+than raw documents):
 
 ```sh
 uv run python scripts/fit.py --model Qwen/Qwen3.5-4B

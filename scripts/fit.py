@@ -1,11 +1,11 @@
 """Fit and cache any HF causal LM's Jacobian for the notebooks and README. (Claude)
 
 Pass `--model`; the cache lands at `config.cache_path(model)` (e.g.
-`artifacts/qwen3.5-4b.jac`). Prompts are jlens's WikiText-103 corpus wrapped in
-the model's chat template (config.chat_corpus): we fit J at the chat operating
-point where steering is applied, matching the verified run-524. jlens guidance:
-~100 prompts is usable, the paper uses 1000; 128 is a cheap default. Idempotent:
-re-running loads the existing cache instead of refitting (Jacobian.fit_cached).
+`artifacts/qwen3.5-4b.jac`). Prompts are jlens's WikiText-103 wrapped in the
+chat template (config.chat_corpus), closer to the distribution the model steers
+in than raw documents. jlens guidance: ~100 prompts is usable, the paper uses
+1000; 128 is a cheap default. Idempotent: re-running loads the existing cache
+instead of refitting (Jacobian.fit_cached).
 
     uv run python scripts/fit.py --model Qwen/Qwen3.5-4B
     uv run python scripts/fit.py --model Qwen/Qwen3-0.6B --dim-batch 8

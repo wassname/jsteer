@@ -283,8 +283,9 @@ class Jacobian:
 
     def lens_topk(self, model, tok, prompt: str, layer: int, *, k: int = 10,
                   position: int = -1) -> list[tuple[str, float]]:
-        """What the model 'thinks' at `layer`: transport the residual to the
-        final basis with J_l and decode. jlens's native use, handy in demos."""
+        """Lens readout at `layer`: transport the residual to the final basis
+        with J_l and decode to tokens (a linear approximation, not the literal
+        computation). jlens's native use, handy in demos."""
         lm = from_hf(model, tok)
         lens_logits, _, _ = self.lens.apply(lm, prompt, layers=[layer],
                                             positions=[position])

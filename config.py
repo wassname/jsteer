@@ -17,21 +17,15 @@ DTYPE = torch.bfloat16
 
 
 def chat_corpus(tok, n_prompts: int) -> list[str]:
-    """Fit corpus at the CHAT operating point: jlens's WikiText prompts, each
-    wrapped in the chat template with the thinking block opened.
-
-    We fit J where we steer. run-524's VERIFIED vectors were fit on chat-
-    templated prompts (artifacts/u4_prompts.json shows `<|im_start|>user ...
-    assistant <think>`), and steering is applied during templated generation.
-    jlens fits raw WikiText because it's a general document lens; jsteer steers
-    a chat model mid-`<think>`, so the linearization point has to match or J is
-    estimated at the wrong operating point. Called via a lambda in fit_cached,
-    so it only runs (and only downloads WikiText) on a cache MISS."""
+    """jlens's WikiText prompts wrapped in the chat template. Fitting on chat-
+    formatted text (not raw documents) puts J closer to the distribution the
+    model steers in; run-524's verified vectors were fit this way too. Called
+    via a lambda in fit_cached, so it only downloads WikiText on a cache miss."""
     from jlens.examples import load_wikitext_prompts
-    raw = load_wikitext_prompts(n_prompts)
     return [tok.apply_chat_template([{"role": "user", "content": p}],
                                     add_generation_prompt=True, tokenize=False,
-                                    enable_thinking=True) for p in raw]
+                                    enable_thinking=True)
+            for p in load_wikitext_prompts(n_prompts)]
 
 
 def slug(model_name: str) -> str:
