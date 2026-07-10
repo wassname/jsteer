@@ -195,6 +195,11 @@ class Jacobian:
         a fit-time concept -- the lens doesn't know n_layers to resolve them)."""
         if layers is None:
             return tuple(self.lens.source_layers)
+        if any(isinstance(l, float) for l in layers):
+            # Claude: int() would silently truncate (0.5, 0.8) -> layer 0 and steer
+            # the wrong layer; float bands only exist at fit time (external review).
+            raise ValueError(f"float layer bands are fit-time only; got {layers}, "
+                             f"pass explicit ints from .layers={self.layers}")
         return tuple(sorted(int(l) for l in layers))
 
     # -- concept -> vector -------------------------------------------------------
@@ -237,6 +242,9 @@ class Jacobian:
             toks = [tok.decode([i]) for i in top.indices.tolist()]
             logger.info(f"persona_topk {name} top-{k}: {toks}")   # read your data:
             # gibberish/punctuation here means the persona mean is off-manifold
+            # Claude: asymmetry is intentional -- token SELECTION goes through the
+            # full logit pipeline (final norm) above, but the cotangent uses raw
+            # W_U rows to match _word_cotangent's verified convention.
             cots[name] = W_U[top.indices].float().mean(0).cpu()
         cfg = JacobianPersonaTopkC(layers=self._steer_layers(layers))
         return self.pullback(cots["pos"] - cots["neg"], cfg)

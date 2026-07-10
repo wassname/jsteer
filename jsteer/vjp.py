@@ -38,6 +38,8 @@ def _valid_mask(attention_mask: Tensor, skip_first: int) -> Tensor:
     real_len = attention_mask.sum(dim=1, keepdim=True)           # [B, 1]
     pos = torch.arange(attention_mask.shape[1], device=attention_mask.device)
     mask = (pos[None, :] >= skip_first) & (pos[None, :] < real_len - 1)
+    # Claude: the & with attention_mask is redundant for right-padded batches
+    # (pos < real_len-1 already excludes pads) but guards non-right-padded input.
     return mask & attention_mask.bool()
 
 
@@ -49,7 +51,8 @@ def pullback_vjp(model, tok, prompts: list[str], layers, cotangent: Tensor, *,
     lm = from_hf(model, tok)   # freezes params, locates blocks; grads flow to
     target_layer = lm.n_layers - 1                     # activations only
     layers = _resolve_layers(layers, lm.n_layers)
-    assert max(layers) < target_layer, f"source layers {layers} must be < {target_layer}"
+    if max(layers) >= target_layer:
+        raise ValueError(f"source layers {layers} must be < target {target_layer}")
     d = cotangent.shape[0]
     G = {l: torch.zeros(d, dtype=torch.float32, device=model.device) for l in layers}
     count = 0
