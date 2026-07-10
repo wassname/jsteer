@@ -82,9 +82,12 @@ def _resolve_layers(layers, n_layers: int) -> list[int]:
 
 def _to_vector(cfg: SteeringConfig, per_layer: dict[int, Tensor]) -> Vector:
     """Wrap unit directions as a steering-lite Vector (mean_diff's layout:
-    stacked["v"] with leading k=1 dim, shared empty)."""
+    stacked["v"] with leading k=1 dim, shared empty). Always CPU fp32 --
+    Jacobian.pullback is CPU-native but the VJP path accumulates on cuda;
+    without the .cpu() the two paths return device-inconsistent Vectors
+    (Claude: found by U4 step-2 crash, pueue 550)."""
     shared = {l: {} for l in per_layer}
-    stacked = {l: {"v": _unit(v.float()).unsqueeze(0)} for l, v in per_layer.items()}
+    stacked = {l: {"v": _unit(v.float().cpu()).unsqueeze(0)} for l, v in per_layer.items()}
     return Vector(cfg, shared, stacked)
 
 
