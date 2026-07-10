@@ -289,10 +289,13 @@ class Jacobian:
         diff = logits_pos - logits_neg                           # [vocab]
         top_pos = diff.topk(k)                                    # pos evokes > neg
         top_neg = (-diff).topk(k)                                 # neg evokes > pos
-        for name, sel in (("pos>neg", top_pos), ("neg>pos", top_neg)):
-            toks = [tok.decode([i]) for i in sel.indices.tolist()]
-            logger.info(f"persona_topk {name} top-{k}: {toks}")  # SHOULD be persona-
-            # specific words now, not generic \n/the; generic here => contrast is null.
+        toks_pos = [tok.decode([i]) for i in top_pos.indices.tolist()]
+        toks_neg = [tok.decode([i]) for i in top_neg.indices.tolist()]
+        # SHOULD be persona-specific words (positive vs negative affect here), not
+        # generic \n/the; generic on both sides means the contrast is null.
+        logger.info(f"j-thoughts (content of mental workspace, top-{k})\n"
+                    f"    positive: {toks_pos}\n"
+                    f"    negative: {toks_neg}")
         w = (W_U[top_pos.indices].float().mean(0)
              - W_U[top_neg.indices].float().mean(0)).cpu()
         cfg = JacobianPersonaTopkC(layers=self._steer_layers(layers))
