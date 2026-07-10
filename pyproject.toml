@@ -13,6 +13,7 @@ dependencies = [
     "steering-lite",   # hook runtime: Vector, attach, `with v(model, C=...)`, calibrate
     "loguru>=0.7",
     "tqdm>=4.66",
+    "tabulate>=0.9",   # Claude: steering_lite.calibrate imports it at module load (undeclared in its core deps)
 ]
 
 [project.optional-dependencies]
@@ -20,8 +21,12 @@ notebooks = ["matplotlib>=3.8", "ipykernel", "tabulate"]
 test = ["pytest"]
 
 [tool.uv.sources]
-jlens = { git = "https://github.com/anthropics/jacobian-lens" }
-steering-lite = { git = "https://github.com/wassname/steering-lite" }
+# Claude: switched from git to local editable path deps. The jlens git source
+# (github.com/anthropics/jacobian-lens) is not a fetchable public repo, and both
+# deps live locally under active co-development, so editable paths are correct
+# for this dev machine. Revert to git sources when publishing.
+jlens = { path = "../j-steer-dev/docs/vendor/jacobian-lens", editable = true }
+steering-lite = { path = "../../lite/steering-lite", editable = true }
 
 [build-system]
 requires = ["setuptools>=68"]
