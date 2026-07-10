@@ -34,8 +34,9 @@ cannot install jsteer yet.
 
 ## Hello world
 
-First build the Jacobian cache (a few minutes on a consumer GPU; any HF model,
-prompts drawn from jlens's WikiText corpus):
+First build the Jacobian cache (any HF model; prompts are jlens's WikiText
+wrapped in the model's chat template, so J is fit at the operating point where
+you steer):
 
 ```sh
 uv run python scripts/fit.py --model Qwen/Qwen3.5-4B
@@ -46,25 +47,23 @@ Then, from the repo root:
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from jsteer import Jacobian
+from jsteer import Jacobian, show_steer
 
 tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B")
 model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-4B", dtype=torch.bfloat16).to("cuda").eval()
 
-jac = Jacobian.load("artifacts/qwen3-0.6b.jac")
+jac = Jacobian.load("artifacts/qwen3.5-4b.jac")
 v = jac.word_vector(model, tok, ["happy", "joy"])
 
-enc = tok("I went to the park today and", return_tensors="pt").to("cuda")
-for C in (-1, 0, 1):
-    with v(model, C=C):
-        out = model.generate(**enc, max_new_tokens=40, do_sample=False,
-                             pad_token_id=tok.eos_token_id)
-    print(f"C={C:+d}:", tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=True))
+# generate through the chat template with thinking on; print, per strength C,
+# the j-space readout + the <think> trace + the answer.
+show_steer(jac, model, tok, v, "Describe how your week has been going.", Cs=(-6, 0, 6))
 ```
 
-The coefficient is model-dependent: on this 0.6B model C around 1-2 moves the
-tone while staying fluent, and C of 8 degenerates into literal "joyjoyjoy"
-spam. `nbs/word_steering.ipynb` shows the sweep.
+The coefficient is model-dependent, so sweep it: a moderate +C moves the tone
+while the text and reasoning stay fluent, and too large a |C| degenerates into
+token spam. `nbs/word_steering.ipynb` shows the full sweep with the j-space and
+`<think>` views.
 
 ## API
 
