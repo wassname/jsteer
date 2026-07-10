@@ -7,7 +7,9 @@
         model.generate(**inputs)
 """
 from . import applies  # noqa: F401  -- registers methods into steering-lite's REGISTRY
+from .demo import chat_input, show_steer, split_think
 from .jacobian import Jacobian
 from .vjp import pullback_vjp, word_vector_vjp
 
-__all__ = ["Jacobian", "pullback_vjp", "word_vector_vjp"]
+__all__ = ["Jacobian", "pullback_vjp", "word_vector_vjp",
+           "show_steer", "chat_input", "split_think"]
