@@ -31,8 +31,15 @@ model = AutoModelForCausalLM.from_pretrained(
     meta["model"], torch_dtype=torch.bfloat16).to("cuda").eval()
 
 t0 = time.time()
+# dim_batch 16 -> 8 (Claude): run 551 was OOM-killed at n_done=36 when the
+# user's VS Code Jupyter kernel (jsteer venv) co-loaded ~1.5GB VRAM + 1.9GB RAM
+# while this fit sat at the 22.4/24.6GB ceiling -- clean SIGKILL, no CUDA
+# traceback = host OOM killer, not a CUDA OOM. dim_batch=8 halves this fit's
+# peak footprint to coexist with the kernel. It only changes the backward
+# SCHEDULE (2x passes), NOT the accumulated Jacobian, so U4 exactness holds.
+# Resumes from the existing checkpoint (n_done=36), lossless.
 jac = Jacobian.fit(model, tok, meta["prompts"], layers=meta["layers"],
-                   dim_batch=16, max_seq_len=384,
+                   dim_batch=8, max_seq_len=384,
                    checkpoint_path=str(ART / "qwen3-4b-authority.ckpt"))
 logger.info(f"fit wall-time: {(time.time() - t0) / 3600:.2f} h")
 jac.save(str(ART / "qwen3-4b-authority.jac"))
