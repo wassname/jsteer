@@ -56,9 +56,13 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
     prompt = chat_input(tok, user_msg)
     enc = tok(prompt, return_tensors="pt").to(model.device)
     name = getattr(model.config, "name_or_path", "model").split("/")[-1]
-    # header carries name/method/delivery/prompt once; per-C blocks only vary in C
+    # header carries name/method/delivery/prompt once; per-C blocks only vary in C.
+    # steering-lite's own configs (e.g. MeanDiffC baseline) have no apply_mode, so
+    # only jsteer vectors show a delivery tag.
+    delivery = getattr(vec.cfg, "apply_mode", None)
+    tag = f" · delivery={delivery}" if delivery else ""
     rule = "=" * 72
-    logger.info(f"\n\n{rule}\n{name} · method={vec.cfg.method} · delivery={vec.cfg.apply_mode}"
+    logger.info(f"\n\n{rule}\n{name} · method={vec.cfg.method}{tag}"
                 f"\nprompt: {user_msg!r}\n{rule}")
     # SHOULD: C=0 is the baseline; +C tilts the lens tokens and tone toward the
     # concept, -C away; all stay coherent (gibberish = coeff too large).
