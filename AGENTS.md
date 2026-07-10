@@ -17,25 +17,29 @@ the math, it is parity-gated against the verified experiment):
 
 Runtime is steering-lite: `with v(model, C=8): model.generate(...)`.
 
-## Remaining work (task list has details; U-numbers from the plan)
+## Status (shipped + verified)
 
-1. uv scaffold: `uv sync` (torch cu121+ index if needed), fix any import errors
-   fail-fast (no defensive fallbacks). LOCAL DEV: you may switch
-   [tool.uv.sources] to path deps (../j-steer-dev/docs/vendor/jacobian-lens
-   and ../../lite/steering-lite, editable) if the git fetches are slow --
-   leave a comment saying which is active and why.
-2. Smoke on Qwen/Qwen3-0.6B: tiny fit (8 short web-text prompts, mid layers,
-   dim_batch 8), word_vector(["happy","joy"]), generate at C in {-8, 0, 8},
-   print FULL first prompt + generations (token-efficient-logging skill).
-3. U1 parity gate BEFORE demos: cos(Jacobian-cache pullback, word_vector_vjp)
-   per layer > 0.999, same prompts/max_length/skip_first. If it fails, that is
-   a bug in the wiring (the math is linear-identical), debug do not tune.
-4. 0.6B real fit (~64 prompts) cached to artifacts/; 4B via pueue (label
-   why:/resolve:).
-5. notebooks/word_steering.ipynb (hello-world), persona_steering.ipynb
-   (persona variants are EXPERIMENTAL -- they failed specificity controls in
-   j-steer-dev; keep that framing), lens_readout.ipynb optional.
-6. README: classic-repeng length, honest evidence section.
+- Core API built: `Jacobian.fit/save/load/from_pretrained` + word / persona /
+  persona_topk / random vectors, one shared pullback path (`jacobian.py`);
+  delivery modes (add / add_last / replace_last) in `applies.py`.
+- Smoke (`scripts/smoke.py`) and any-model fit (`scripts/fit.py --model ...`,
+  prompts from jlens's WikiText corpus) green; `config.py` holds slug/paths.
+- U1 parity gate PASS -- cache pullback == direct VJP, cos > 0.999:
+  `docs/evidence/parity_u1.txt`.
+- U4 port check PASS -- jsteer VJP == run-524 reference vector, cos +1.0:
+  `docs/evidence/u4_step2_vjp_parity.txt`.
+- Notebooks: `word_steering` (verified), `persona_steering` (experimental --
+  failed specificity controls in j-steer-dev, framing kept honest).
+- README at classic-repeng length with an honest evidence section.
+
+## Open
+
+- U4 loop-close (`scripts/u4_step3_fit4b.py`): full 4B fit -> cached word
+  vector must match the VJP and run-524 vectors (cos > 0.999). Resumable from
+  `artifacts/qwen3-4b-authority.ckpt`; writes `artifacts/u4_loopclose.txt`.
+- One-off validation scripts live in `scripts/scratch/` (u4_step1/2, parity_u1).
+- TODO eval notebook: steer -authority, tinymfv fast (N=16, tokens=16, mfq-2)
+  vs unsteered baseline.
 
 ## Style
 

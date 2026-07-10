@@ -1,6 +1,6 @@
 # jsteer
 
-Steer a language model by pulling concept directions back through its Jacobian.
+Steer a language model by pulling concept directions back through its [Jacobian](https://github.com/anthropics/jacobian-lens).
 
 Fit the model's full per-layer Jacobian once (expensive, cached to disk); after
 that every steering vector is a CPU matvec. Name the words you want more or
@@ -10,12 +10,15 @@ less of, get a steering vector, and generate inside a `with` block:
 v_l = unit( J_l^T @ w )
 ```
 
-where `J_l = E_prompts[ d h_final / d h_l ]` is the position-averaged Jacobian
-from [jlens](../j-steer-dev/docs/vendor/jacobian-lens) and `w` is a direction
-in the final-layer basis naming the concept (for words: the mean unembedding
-row). By linearity the cached pullback equals the direct per-prompt VJP
-(`mean_p(J_p)^T w = mean_p(J_p^T w)`, parity-tested in
-`artifacts/parity_u1.txt`), so caching costs nothing but fp16 rounding.
+where `J_l = E_prompts[ d h_final / d h_l ]` is the Jacobian averaged over
+prompts and positions (from [jlens](../j-steer-dev/docs/vendor/jacobian-lens))
+and `w` is a cotangent: a direction in the final-layer basis naming the concept
+(for words, the mean unembedding row). `J_l^T @ w` is the pullback of `w`, the
+standard autodiff name for J-transpose applied to a cotangent. By linearity the
+cached pullback equals the direct per-prompt VJP (vector-Jacobian product, the
+same map computed in one backward): `mean_p(J_p)^T w = mean_p(J_p^T w)`,
+parity-tested in [`docs/evidence/parity_u1.txt`](docs/evidence/parity_u1.txt),
+so caching costs nothing but fp16 rounding.
 
 ## Install
 
@@ -31,10 +34,11 @@ cannot install jsteer yet.
 
 ## Hello world
 
-First build the Jacobian cache (a few minutes on a consumer GPU):
+First build the Jacobian cache (a few minutes on a consumer GPU; any HF model,
+prompts drawn from jlens's WikiText corpus):
 
 ```sh
-uv run python scripts/fit_qwen06b.py
+uv run python scripts/fit.py --model Qwen/Qwen3.5-4B
 ```
 
 Then, from the repo root:
@@ -44,8 +48,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from jsteer import Jacobian
 
-tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", dtype=torch.bfloat16).to("cuda").eval()
+tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B")
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-4B", dtype=torch.bfloat16).to("cuda").eval()
 
 jac = Jacobian.load("artifacts/qwen3-0.6b.jac")
 v = jac.word_vector(model, tok, ["happy", "joy"])
@@ -60,13 +64,14 @@ for C in (-1, 0, 1):
 
 The coefficient is model-dependent: on this 0.6B model C around 1-2 moves the
 tone while staying fluent, and C of 8 degenerates into literal "joyjoyjoy"
-spam. `notebooks/word_steering.ipynb` shows the sweep.
+spam. `nbs/word_steering.ipynb` shows the sweep.
 
 ## API
 
 | call | status | what it does |
 | --- | --- | --- |
 | `Jacobian.fit(model, tok, prompts, layers=(0.3, 0.9))` | — | fit per-layer `J_l` (jlens; 1 forward + ~d_model/8 backwards per prompt, resumable) |
+| `Jacobian.fit_cached(model, tok, prompts, path)` | — | load `path` if present, else fit and save it (idempotent build-or-load) |
 | `jac.save(path)` / `Jacobian.load(path)` | — | fp16 cache on disk, jlens-compatible |
 | `jac.word_vector(model, tok, words)` | verified | pull the words' unembedding direction back; +C says them more |
 | `jac.persona_vector(model, tok, pos, neg)` | experimental | pull back the personas' final-layer activation contrast |
@@ -90,14 +95,18 @@ whole evidence base; treat other models and concepts as untested.
 The persona variants failed specificity controls in the same experiments:
 they steer generations, but no more selectively than an unrelated persona's
 vector. They are shipped for experimentation only
-(`notebooks/persona_steering.ipynb` keeps this framing and includes a
+(`nbs/persona_steering.ipynb` keeps this framing and includes a
 mean_diff baseline).
 
 ## Credits
 
 - [jlens](../j-steer-dev/docs/vendor/jacobian-lens): the Jacobian estimator
   and cache format, by the jacobian-lens authors (wrapped, never
-  reimplemented).
+  reimplemented). [Antropics works](https://github.com/anthropics/jacobian-lens)
+  - Earlier work:
+     - How to recover the latent process using Jacobians (Identifiability of nonlinear ICA): https://arxiv.org/pdf/2206.07751
+     - How to handle dependent latents and assumption violations (again, through Jacobians): https://arxiv.org/pdf/2311.00866
+     - For general latent variable models, what remains recoverable with guarantees, and why Jacobians are universally helpful? (We could generalize SAEs to the general nonlinear case, with Jacobians!): https://arxiv.org/pdf/2604.17568
 - [steering-lite](https://github.com/wassname/steering-lite): the runtime
   (`Vector`, attach/detach hooks, calibration).
 - Shape of the library inspired by [repeng](https://github.com/vgel/repeng).

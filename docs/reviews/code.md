@@ -1,56 +1,33 @@
-Now let me verify one more file — checking if there are tests or any additional files:Here is the full review.
-
----
-
-## Code Review: jsteer — Jacobian pullback steering library
-
-### Summary
-This is a thin, well-structured wrapper around `jlens` (Jacobian fitting/caching) and `steering-lite` (hook runtime). Fit once, derive steering vectors nearly for free. The math is parity-gated (cos > 0.999 vs direct VJP), so the review focuses on wiring, device/dtype handling, silent-failure anti-patterns, and API misuse. Overall the code is clean and follows the project's "fail fast, no defensive programming" convention, but has a few sharp edges.
-
-### Important (should fix)
-
-- **`jsteer/vjp.py:54`** — `assert max(layers) < target_layer` is an assert, not a `ValueError`. Asserts are stripped when Python runs with `-O`, which would let through invalid layer configs and produce incorrect gradients (source layers at or past the target layer). Replace with:
-  ```python
-  if max(layers) >= target_layer:
-      raise ValueError(f"source layers {layers} must be < {target_layer}; got max={max(layers)}")
-  ```
-  The convention of raising `ValueError` for this is established in `Jacobian.pullback` which does exactly that for missing layers.
-
-- **`jsteer/jacobian.py:92-105`** (`_h_bar_final`) — No guard for empty `prompts`. If called with an empty list, `acc` stays `None` and `acc / n` raises `TypeError` (None / 0) rather than a clear error. Given that `persona_vector` and `persona_topk_vector` both call this with caller-supplied prompt lists, a well-meaning empty-pass is plausible. Add a check at the top:
-  ```python
-  if not prompts:
-      raise ValueError("prompts must not be empty")
-  ```
-
-### Suggestions
-
-- **`jsteer/jacobian.py:60-68`** (`_steer_layers`) — `tuple(sorted(int(l) for l in layers))` silently truncates float bands (e.g. `(0.5, 0.8)` → `(0, 0)`) rather than rejecting them. Float bands are only meaningful at fit time (`_resolve_layers` handles them), and `_steer_layers` is post-fit. A `ValueError` for float inputs would make the contract explicit and prevent a user from accidentally passing `layers=(0.5, 0.8)` and getting nonsense layers (0, 0).
-
-- **`jsteer/jacobian.py:166-179`** (`persona_topk_vector`) — Calls `from_hf(model, tok)` on its first line, then `_h_bar_final` twice (which internally also calls `from_hf`). Three redundant `HFLensModel` constructions: three iterations over all params to freeze, three layout detections. Each `from_hf` is ~1-2 ms plus linear in param count, so for the 0.6B model it's invisible but for larger models it adds up. Extract `lm = from_hf(model, tok)` once and pass `n_layers` to `_h_bar_final` (or refactor `_h_bar_final` to accept a pre-made `lm`).
-
-- **`jsteer/jacobian.py:96-98`** (`_h_bar_final`) — Uses `model(**enc)` (the full HF model including LM head forward) rather than `lm.forward(input_ids)` (residual stack only). The LM head computation is wasted work done for every batch. Under `@torch.no_grad()` the overhead is minor but inconsistent: `pullback_vjp` uses `model(**enc)` too (needs the full model because of hook placement), but `jlens.fit` correctly uses `lm.forward`. Would be cleaner to use `lm.forward` here since only residuals are needed.
-
-- **`jsteer/jacobian.py:171,185-186`** (`persona_topk_vector`) — `cots[name] = W_U[top.indices].float().mean(0).cpu()` reads raw unembedding rows (no final norm), while `lm.unembed(...)` above goes through final norm to pick the top-k tokens. This is intentional (consistent with `_word_cotangent`'s raw-row convention and the docstring), but it does mean the "most evoked tokens" are selected via the full logit pipeline while the downstream cotangent uses the raw dueling basis. A single-line comment explaining the asymmetry would help future readers.
-
-- **`jsteer/vjp.py:29-34`** (`_valid_mask`) — `mask & attention_mask.bool()` redundantly masks with the attention mask after already filtering by `pos < real_len - 1`. For standard HF right-padded batches these are equivalent, but the redundancy isn't harmful. Fine to leave, but a one-line comment that it's a belt-and-suspenders check would prevent a future reader from "simplifying" it and breaking left-padded or non-square attention mask scenarios.
-
-- **`jsteer/jacobian.py:188`** (`random_vector`) — Generates directions on CPU without an explicit `dtype` argument. `torch.randn` defaults to `torch.float32`, which is correct. If this ever needs to match the model dtype (e.g. bf16), it would need updating.
-
-- **`jsteer/applies.py`** — The `_extract_stub` and registration loop are clean but the docstring in `_extract_stub` could mention that `steering_lite.train` is the entry point being blocked. Currently the error message explains what to do, but a developer seeing "NotImplementedError: jsteer methods are extracted via Jacobian..." from inside `steering_lite.train()` might not immediately connect the dots. Minor.
-
-### Positive
-
-- **`jsteer/jacobian.py:109-117`** (`pullback`) — Pre-validates cotangent shape and layer membership with clear `ValueError` messages before touching tensors. Exactly the right fail-fast pattern.
-
-- **`jsteer/vjp.py:62-64`** — The zero-valid-positions check catches short prompts early with a clear error, preventing silent zeros downstream.
-
-- **`jsteer/applies.py`** — `apply_add_last` correctly degrades to `apply_add` when span ≥ sequence length (the slicing `y[:, :-k, :]` yields empty, `cat` reconstructs the full sequence). Documented and correct.
-
-- **Sign convention consistency** — All three concept-method docstrings explicitly state what `+C` does, and the pullback computation (`w @ J_l`, i.e., `J_l^T @ w`) is consistent: `+C` enhances the named concept.
-
-- **`_to_vector` layout** — The `stacked["v"].unsqueeze(0)` with `k=1` leading dim matches `steering_lite`'s `mean_diff` layout byte-for-byte, so calibration and serialization reuse the upstream code unchanged. This is the correct integration pattern.
-
-### Verdict
-**APPROVE** with minor fixes.
-
-The `assert` → `ValueError` in `vjp.py:54` and the empty-prompts guard in `_h_bar_final` are the two changes worth making before shipping. Everything else is suggestions. The wiring is correct, the sign conventions are consistent, the jlens API is used properly (no reinvention of the estimator), and the parity gate confirms numerical equivalence.
+| file:line | issue | concrete fix |
+| --- | --- | --- |
+| `AGENTS.md:3-4` | Archaeology — CUT: `Plan of record: /home/.../.claude/plans/...` and experiment-journal pointer are private/dev-process breadcrumbs, not reader guidance. | Remove the plan path. If needed, keep one stable line: `Evidence: docs/evidence/` or link to public docs only. |
+| `AGENTS.md:8-10` | Archaeology — CUT/SHORTEN: `WRITTEN (by the main agent, ported from verified j-steer-dev code -- do not rewrite...)` exposes agent/provenance history. | Replace with: `Core math is parity-tested; avoid changing it without rerunning parity checks.` |
+| `AGENTS.md:26-29` | Archaeology — CUT: `U1 parity gate`, `U4 port check`, `run-524 reference vector` are internal run IDs. | Replace with one durable note: `Parity evidence lives under docs/evidence/.` |
+| `AGENTS.md:34-40` | Archaeology — CUT: `U4 loop-close`, resumable artifact path, scratch scripts, TODO eval notebook are active worklog state. | Move to issue tracker or scratch notes; keep AGENTS to stable repo conventions only. |
+| `AGENTS.md:46` | Archaeology — CUT: `Comments marked as Claude-authored where opinionated.` This preserves exactly the diary comments the library should lose. | Delete; comments should explain code, not authorship. |
+| `jsteer/jacobian.py:3`, `jsteer/vjp.py:3`, `jsteer/applies.py:3` | Archaeology — CUT: `(drafted by Claude, ported from the verified j-steer-dev experiment code)`. | Delete from all module docstrings. |
+| `jsteer/jacobian.py:5-6` | Archaeology — SHORTEN: `verified in j-steer-dev... Qwen3-4B, n=3 seeds` puts experiment diary in the core module header. | Move evidence detail to README/docs; module should say only that `word_vector` is the default verified path. |
+| `jsteer/jacobian.py:20-22` | Archaeology — SHORTEN: `FAILED specificity controls in j-steer-dev...` is useful status but too journal-like in the module overview. | Replace with: `Persona variants are experimental and not recommended for targeted steering.` |
+| `jsteer/vjp.py:12-13` | Archaeology — CUT: `this is the code path that produced the verified j-steer-dev result` is provenance, not API explanation. | Delete; keep only estimator conventions if needed. |
+| `jsteer/vjp.py:87-90` | Archaeology + jargon — SHORTEN: `verified j-steer-dev method-0 extraction` and `linearization substrate` read like experiment notes. | Use: `Direct word-vector extraction over prompts; matches Jacobian.fit(...).word_vector(...) when settings match.` |
+| `jsteer/jacobian.py:84-88` | Archaeology — CUT/SHORTEN: `_to_vector` docstring ends with `(Claude: found by U4 step-2 crash, pueue 550)`. | Keep the reason, drop diary: `Always CPU fp32 so cached and VJP paths return device-consistent Vectors.` |
+| `jsteer/jacobian.py:202-203` | Archaeology — SHORTEN: `Claude: ... (external review)` is attribution/provenance. | Keep only: `Float bands are only resolved during fitting; steering requires explicit layer ints.` |
+| `jsteer/jacobian.py:246-250` | Archaeology — SHORTEN: `# read your data:` plus `# Claude: asymmetry is intentional...` is chatty and attributed. | Keep concise rationale: `# Token selection uses unembed/final norm; cotangent uses raw W_U rows to match word_vector.` |
+| `jsteer/vjp.py:41-42` | Archaeology — KEEP rationale, CUT attribution: `# Claude: the & with attention_mask...`. | Change to: `# Redundant for right-padded batches, but guards other padding layouts.` |
+| `README.md:16-18` | Archaeology — SHORTEN: `parity-tested in artifacts/parity_u1.txt` brings internal artifact naming into the first explanation. | Say: `The cached pullback matches the direct VJP up to fp16 rounding.` Move artifact links to evidence docs. |
+| `README.md:96-104` | Cleanliness — CUT: Credits include a long “Earlier work” reading list and speculative aside `We could generalize SAEs...`; also typo-like `Antropics works`. | Keep credits to the two deps plus repeng inspiration. Move papers elsewhere if needed. |
+| `README.md:3,16-18` | Jargon — `pulling concept directions back` and `VJP` appear before defining that they are the same operation. | First use should read: `pullback — a vector-Jacobian product (VJP), J_l^T @ w — ...`. Then use one term consistently. |
+| `jsteer/jacobian.py:20-26` | Jargon — `pullbacks`, `pulled back`, and `VJP` are all used without saying pullback = vector-Jacobian product. | Add one early definition after the formula: `Here pullback means the VJP J_l^T @ w.` |
+| `jsteer/vjp.py:1` | Jargon — `Direct VJP pullback` stacks two undefined terms in the first sentence. | Use: `Direct vector-Jacobian product (VJP) pullback for one concept.` |
+| `jsteer/jacobian.py:10,25`, `README.md:13` | Jargon — `position-averaged` / `pooled Jacobian` are coined terms unless the averaging axes are stated. | Define first use as: `averaged over fitting prompts and valid token positions`; avoid later switching to `pooled`. |
+| `jsteer/vjp.py:88` | Jargon — `linearization substrate` is not sourced from jlens/repeng and is undefined. | Replace with plain language: `over the fitting prompts` or `over the prompts used to estimate the Jacobian`. |
+| `jsteer/applies.py:112-115` | Jargon + over-explanation — `A "virtual token" injection...` is undefined and then explained by edge-case internals. | Rename plainly: `Replace the last k residual directions with v at the original activation norm; no sequence length changes.` |
+| `jsteer/jacobian.py:1-39` | Docstring too long — module docstring repeats README, evidence, variants, cache rationale, layout, and usage; the core sentence is buried. | Cut to ~6 lines: purpose, formula, `fit`/`word_vector` usage. Move evidence/status to README. |
+| `jsteer/vjp.py:1-18` | Docstring too long — repeats cached-path parity and estimator details before the reader sees the function. | Keep a short module docstring; put only necessary estimator notes on `pullback_vjp`. |
+| `jsteer/applies.py:1-33` | Docstring too long — explains config, extraction, delivery, protocol, position semantics, and sign conventions all up front. | Replace with: `Register jsteer Vector methods with steering-lite and implement apply modes.` Move sign conventions to README/API docs if needed. |
+| `jsteer/jacobian.py:94-98` | Docstring too long/chatty — `_word_cotangent` includes `Pulling THIS back... pure concept->residual map... persona-bundle confound`. | Shorten to: `Mean lm_head row for the first sub-token of each word; +C raises those logits.` |
+| `jsteer/jacobian.py:146-150` | Docstring too long — `fit` buries the action under cost model and checkpoint details. | First sentence only: `Fit per-layer Jacobians on prompts using jlens.` Move cost/checkpoint detail to parameter docs or README. |
+| `jsteer/jacobian.py:232-236` | Docstring too long — `persona_topk_vector` explains the whole experimental rationale inline. | Shorten to one sentence plus status: `Experimental: contrast top-k unembedded tokens from positive/negative persona means, then pull back like word_vector.` |
+| `jsteer/jacobian.py:256-257` | Docstring/editorial — `Any honest demo/eval should show...` is moralizing. | Use neutral text: `Norm-matched random control vector for baseline comparisons.` |
+| `jsteer/jacobian.py:264,268-269` | Docstring/comment style — `bonus` and `What the model 'thinks'` are demo prose, not clean API wording. | Rename comment to `# -- lens readout --`; docstring: `Decode the lens readout for a layer and position.` |
+| `jsteer/applies.py:94-115` | Docstrings too explanatory for tiny apply functions; they repeat implementation details visible in the code. | Keep one-line behavior summaries for `apply_add`, `apply_add_last`, `apply_replace_last`; move caveats to README if users need them. |

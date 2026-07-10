@@ -32,5 +32,12 @@ steering-lite = { path = "../../lite/steering-lite", editable = true }
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.8",
+    "datasets>=2.0",   # jlens.examples.load_wikitext_prompts: the fitting corpus for fit.py
+]
+
 [tool.setuptools]
 packages = ["jsteer"]

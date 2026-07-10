@@ -3,7 +3,7 @@
 (authored by Claude)
 
 The two paths are linear-identical:  mean_p(J_p)^T w == mean_p(J_p^T w).
-Path A pulls the word cotangent through the CACHED pooled Jacobian.
+Path A pulls the word cotangent through the CACHED averaged Jacobian.
 Path B contracts the same cotangent inside per-prompt backward passes.
 The only expected gap is fp16 storage in the cache, so per-layer cosine must
 exceed 0.999. A failure is a WIRING bug (layer index, position mask, pooling),
@@ -25,7 +25,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from jsteer import Jacobian, word_vector_vjp
 
 # Claude: repo root on path so `scripts.smoke` imports whether run as a file or -m.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # scripts/scratch/ -> repo root
 from scripts.smoke import CACHE, DEVICE, DTYPE, MODEL, PROMPTS  # same inputs  # noqa: E402
 
 WORDS = ["happy", "joy"]
@@ -46,7 +46,7 @@ def main() -> None:
     layers = jac.layers  # exact int layers fitted by the smoke
     logger.info(f"cached layers={layers}")
 
-    # Path A: cached pooled Jacobian pullback.
+    # Path A: cached averaged Jacobian pullback.
     vA = jac.word_vector(model, tok, WORDS)
     # Path B: direct per-prompt VJP over the SAME prompts / layers / skip_first / max_length.
     vB = word_vector_vjp(model, tok, PROMPTS, WORDS, layers=layers, max_length=128)

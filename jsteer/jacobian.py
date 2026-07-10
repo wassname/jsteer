@@ -1,35 +1,36 @@
-"""Full-Jacobian extraction for steering: fit once, steer any concept.
-
-(drafted by Claude, ported from the verified j-steer-dev experiment code)
+"""Fit a model's Jacobian once, then steer any concept by pulling a direction
+back through it. (Claude)
 
 The method (verified in j-steer-dev: word steering beat a norm-matched random
 control on 3/5 moral foundations, Qwen3-4B, n=3 seeds):
 
     v_l = unit( J_l^T @ w )
 
-where `J_l = E_prompts[ d h_final / d h_l ]` is the jlens position-averaged
-Jacobian -- the researchers' verified estimator, reused via `jlens.fitting.fit`
-(never reimplemented) -- and `w` is a cotangent in the FINAL-layer basis naming
-the concept to steer:
+`J_l = E_prompts[ d h_final / d h_l ]` is the Jacobian of the final-layer
+residual with respect to layer `l`, averaged over prompts and token positions
+(jlens's verified estimator, via `jlens.fitting.fit`, never reimplemented). `w`
+is a COTANGENT: a direction placed at the OUTPUT (final-layer basis) naming the
+concept -- for words, the unembedding row that raises those tokens' logits.
+`J_l^T @ w` sends that output-space target back to a residual direction at layer
+`l`: the PULLBACK of `w` (the standard autodiff / differential-geometry name for
+J-transpose applied to a cotangent; the reverse-mode-autodiff way to compute the
+same vector is the vector-Jacobian product, VJP -- see vjp.py). Three ways to
+build `w`:
 
     word_vector           w = mean unembedding row of the words     VERIFIED
     persona_vector        w = h_bar(pos) - h_bar(neg)               EXPERIMENTAL*
     persona_topk_vector   w = contrast of the top-k tokens each     EXPERIMENTAL
                           persona evokes at the final layer
 
-    * persona-contrast pullbacks FAILED specificity controls in j-steer-dev
+    * persona-contrast vectors FAILED specificity controls in j-steer-dev
       (moved the target axis no more than an unrelated persona did). Shipped
       for experimentation, not as a recommendation.
 
 Why cache the full J: by linearity `mean_p(J_p)^T w = mean_p(J_p^T w)`, so a
-vector pulled back through the cached pooled Jacobian is numerically the same
-vector the direct per-prompt VJP produces (see vjp.py; parity-tested). Fitting
-is the expensive step (one forward + ceil(d_model/dim_batch) backwards per
-prompt); afterwards every concept vector is a CPU matvec.
-
-The Jacobian is always fit against the FINAL layer basis (jlens default), so
-cotangents are measured there: unembedding rows live there natively, persona
-means are recorded there.
+vector pulled back through the cached averaged Jacobian is numerically identical
+to the direct per-prompt VJP (vjp.py; parity-tested). Fitting is the expensive
+step (one forward + ceil(d_model/dim_batch) backwards per prompt); afterwards
+every concept vector is a CPU matvec.
 
 Vectors come out as `steering_lite.Vector` (unit direction per layer in
 stacked["v"], k=1 leading dim -- mean_diff's exact layout), so steering is:
@@ -40,6 +41,7 @@ stacked["v"], k=1 leading dim -- mean_diff's exact layout), so steering is:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from jlens.fitting import fit as _jlens_fit
@@ -84,8 +86,7 @@ def _to_vector(cfg: SteeringConfig, per_layer: dict[int, Tensor]) -> Vector:
     """Wrap unit directions as a steering-lite Vector (mean_diff's layout:
     stacked["v"] with leading k=1 dim, shared empty). Always CPU fp32 --
     Jacobian.pullback is CPU-native but the VJP path accumulates on cuda;
-    without the .cpu() the two paths return device-inconsistent Vectors
-    (Claude: found by U4 step-2 crash, pueue 550)."""
+    without the .cpu() the two paths return device-inconsistent Vectors."""
     shared = {l: {} for l in per_layer}
     stacked = {l: {"v": _unit(v.float().cpu()).unsqueeze(0)} for l, v in per_layer.items()}
     return Vector(cfg, shared, stacked)
@@ -167,6 +168,23 @@ class Jacobian:
         """Local file/dir or HuggingFace Hub repo_id (see JacobianLens)."""
         return cls(lens=JacobianLens.from_pretrained(name_or_path, **kw))
 
+    @classmethod
+    def fit_cached(cls, model, tok, prompts, path, **fit_kw) -> "Jacobian":
+        """Load `path` if it exists, else fit and save it there. `prompts` may be
+        a list or a zero-arg callable returning one -- the callable runs only on
+        a cache MISS, so a cache hit never pays to build the corpus (e.g. stream
+        WikiText). Path is caller-supplied so the library never needs the repo
+        layout; scripts and notebooks derive it from the model name
+        (config.cache_path), which is what lets one line fit-or-load any model."""
+        path = str(path)
+        if Path(path).exists():
+            logger.info(f"loading cached Jacobian: {path}")
+            return cls.load(path)
+        logger.info(f"no cache at {path}; fitting (the expensive step)")
+        jac = cls.fit(model, tok, prompts() if callable(prompts) else prompts, **fit_kw)
+        jac.save(path)
+        return jac
+
     @property
     def layers(self) -> list[int]:
         return self.lens.source_layers
@@ -199,8 +217,8 @@ class Jacobian:
         if layers is None:
             return tuple(self.lens.source_layers)
         if any(isinstance(l, float) for l in layers):
-            # Claude: int() would silently truncate (0.5, 0.8) -> layer 0 and steer
-            # the wrong layer; float bands only exist at fit time (external review).
+            # int() would silently truncate (0.5, 0.8) -> layer 0 and steer the
+            # wrong layer; float bands only exist at fit time.
             raise ValueError(f"float layer bands are fit-time only; got {layers}, "
                              f"pass explicit ints from .layers={self.layers}")
         return tuple(sorted(int(l) for l in layers))
@@ -244,10 +262,10 @@ class Jacobian:
             top = logits.topk(k)
             toks = [tok.decode([i]) for i in top.indices.tolist()]
             logger.info(f"persona_topk {name} top-{k}: {toks}")   # read your data:
-            # gibberish/punctuation here means the persona mean is off-manifold
-            # Claude: asymmetry is intentional -- token SELECTION goes through the
-            # full logit pipeline (final norm) above, but the cotangent uses raw
-            # W_U rows to match _word_cotangent's verified convention.
+            # gibberish/punctuation here means the persona mean is off-manifold.
+            # Asymmetry is intentional: token SELECTION goes through the full
+            # logit pipeline (final norm) above, but the cotangent uses raw W_U
+            # rows to match _word_cotangent's convention.
             cots[name] = W_U[top.indices].float().mean(0).cpu()
         cfg = JacobianPersonaTopkC(layers=self._steer_layers(layers))
         return self.pullback(cots["pos"] - cots["neg"], cfg)

@@ -16,7 +16,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from jsteer import word_vector_vjp
 
-ART = Path(__file__).resolve().parent.parent / "artifacts"
+ART = Path(__file__).resolve().parent.parent.parent / "artifacts"  # scripts/scratch/ -> repo root
 meta = json.loads((ART / "u4_prompts.json").read_text())
 ref = torch.load(ART / "u4_ref_524.pt")
 

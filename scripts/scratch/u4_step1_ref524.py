@@ -2,13 +2,13 @@
 
 (Claude) Run this under j-steer-dev's venv, NOT jsteer's:
 
-    cd ../j-steer-dev && uv run python ../jsteer/scripts/u4_step1_ref524.py
+    cd ../j-steer-dev && uv run python ../jsteer/scripts/scratch/u4_step1_ref524.py
 
 There `import jsteer` resolves to the OLD experiment package (j-steer-dev/src),
 whose extract_word_pullback produced the verified 3/5 result. Run 524 never
 persisted its vector tensors (only eval JSONs), but the extraction is
 deterministic (seed-0 prompts, greedy, no sampling), so re-running it IS the
-reference. Also dumps the 512 substrate prompts so steps 2/3 consume this one
+reference. Also dumps the 512 fitting prompts so steps 2/3 consume this one
 artifact instead of regenerating them (no drift axis).
 
 Exact run-524 parameters: Qwen/Qwen3-4B, persona=authority, n_pairs=256,
@@ -25,7 +25,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from jsteer.pullback import extract_word_pullback  # OLD package (j-steer-dev/src)
 
-ART = Path(__file__).resolve().parent.parent / "artifacts"
+ART = Path(__file__).resolve().parent.parent.parent / "artifacts"  # scripts/scratch/ -> repo root
 MODEL = "Qwen/Qwen3-4B"
 WORDS = ["authority", "obey", "command", "hierarchy"]
 
@@ -40,7 +40,7 @@ layers = tuple(range(max(2, int(n * 0.2)), min(n - 2, int(n * 0.8))))  # run_swe
 persona_pairs, template = PERSONA_REGISTRY["authority"]
 pos, neg = make_persona_pairs(tok, n_pairs=256, thinking=True,
                               persona_pairs=persona_pairs, template=template, seed=0)
-prompts = pos + neg  # run_sweep feeds pos+neg as the linearization substrate
+prompts = pos + neg  # run_sweep feeds pos+neg as the prompts J is linearized on
 (ART / "u4_prompts.json").write_text(json.dumps(
     {"model": MODEL, "layers": list(layers), "words": WORDS, "prompts": prompts}))
 logger.info(f"dumped {len(prompts)} prompts, layers={layers}")

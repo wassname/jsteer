@@ -1,6 +1,6 @@
 """steering-lite method registration + modular delivery of jacobian vectors.
 
-(drafted by Claude, ported from the verified j-steer-dev experiment code)
+(Claude)
 
 jsteer vectors are plain `steering_lite.Vector` objects: one unit direction v
 per layer in `stacked["v"]` with a leading k=1 dim `[1, d]` (byte-identical
@@ -8,8 +8,9 @@ layout to steering-lite's mean_diff), so attach / calibrate / save / `with
 v(model, C=...)` all work unchanged.
 
 Extraction never goes through steering-lite's `train()` (it needs gradients
-that train's no_grad path can't give) -- it lives in `jacobian.py` (cached
-full-J pullback) and `vjp.py` (direct VJP). The `extract` entries here are
+that train's no_grad path can't give) -- it lives in `jacobian.py` (the cached
+pullback, `J^T @ w` read off the stored Jacobian) and `vjp.py` (the same vector
+via one backward, a vector-Jacobian product). The `extract` entries here are
 stubs that say so.
 
 DELIVERY of v to the residual stream is decoupled from extraction: the same v

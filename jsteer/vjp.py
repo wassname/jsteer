@@ -1,13 +1,13 @@
-"""Direct VJP pullback: one concept without paying for the full Jacobian.
+"""Direct VJP pullback: `J^T @ w` in one backward pass, no cached Jacobian. (Claude)
 
-(drafted by Claude, ported from the verified j-steer-dev experiment code)
-
-Computes the SAME vector as `Jacobian.pullback` -- by linearity
-`mean_p(J_p^T w) = mean_p(J_p)^T w` -- but contracts the cotangent inside the
-backward pass, so the cost is ONE backward per prompt instead of
-ceil(d_model/dim_batch). Use this when you want a single concept and don't
-need the reusable cache; use it in tests as the parity reference for the
-cached path (cos > 0.999 per layer expected, fp16 storage being the only gap).
+VJP = vector-Jacobian product: reverse-mode autodiff contracts a COTANGENT `w`
+(a direction placed at the final layer) inside the backward pass, yielding the
+same per-layer `J_l^T @ w` that `Jacobian.pullback` reads off the cached matrix
+-- by linearity `mean_p(J_p^T w) = mean_p(J_p)^T w`. Cost is ONE backward per
+prompt (vs ceil(d_model/dim_batch) for the full fit). Use it for a single
+concept when you don't need the reusable cache, and as the parity reference for
+the cached path (cos > 0.999 per layer expected; fp16 cache storage is the only
+gap).
 
 Estimator conventions are jlens's exactly (this is the code path that produced
 the verified j-steer-dev result): cotangent placed at every valid target
@@ -38,7 +38,7 @@ def _valid_mask(attention_mask: Tensor, skip_first: int) -> Tensor:
     real_len = attention_mask.sum(dim=1, keepdim=True)           # [B, 1]
     pos = torch.arange(attention_mask.shape[1], device=attention_mask.device)
     mask = (pos[None, :] >= skip_first) & (pos[None, :] < real_len - 1)
-    # Claude: the & with attention_mask is redundant for right-padded batches
+    # the & with attention_mask is redundant for right-padded batches
     # (pos < real_len-1 already excludes pads) but guards non-right-padded input.
     return mask & attention_mask.bool()
 
@@ -84,8 +84,8 @@ def pullback_vjp(model, tok, prompts: list[str], layers, cotangent: Tensor, *,
 def word_vector_vjp(model, tok, prompts: list[str], words: list[str], *,
                     layers=None, batch_size: int = 8, max_length: int = 128,
                     skip_first: int = SKIP_FIRST_N_POSITIONS) -> Vector:
-    """The verified j-steer-dev method-0 extraction, self-contained: word
-    cotangent pulled back over `prompts` as linearization substrate. Same
+    """The verified j-steer-dev word extraction, self-contained: the word
+    cotangent pulled back over `prompts` (the prompts J is linearized on). Same
     vector as Jacobian.fit(model, tok, prompts).word_vector(...) when the
     prompts, layers, skip_first and max length match."""
     cot = _word_cotangent(model, tok, words)

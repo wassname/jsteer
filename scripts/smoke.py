@@ -14,19 +14,22 @@ SHOULD line so a deviation is legible.
 """
 from __future__ import annotations
 
-import torch
+import sys
+from pathlib import Path
+
 from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from jsteer import Jacobian
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root for config
+import config  # noqa: E402
+from config import DEVICE, DTYPE  # noqa: E402
+from jsteer import Jacobian  # noqa: E402
 
 MODEL = "Qwen/Qwen3-0.6B"
-CACHE = "artifacts/qwen3-0.6b-smoke.jac"
-DEVICE = "cuda"
-DTYPE = torch.bfloat16
+CACHE = str(config.ART / "qwen3-0.6b-smoke.jac")
 
-# Claude: 8 english web-text-ish prompts, each padded past 17 tokens so jlens
-# (skip_first=16, drop final) has >=1 valid source position per prompt.
+# Text to fit the smoke Jacobian on. Kept >17 tokens each because jlens drops
+# the first 16 positions, so shorter prompts leave nothing to fit.
 PROMPTS = [
     "The weather this morning was cold and grey, so I made a large pot of coffee and sat by the window watching the rain fall.",
     "Scientists have long argued about whether the early universe expanded smoothly or in sudden bursts that left traces we can still measure today.",
