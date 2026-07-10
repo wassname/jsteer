@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-notebooks = ["matplotlib>=3.8", "ipykernel", "tabulate"]
+notebooks = ["matplotlib>=3.8", "ipykernel", "tabulate", "nbformat", "nbconvert"]
 test = ["pytest"]
 
 [tool.uv.sources]

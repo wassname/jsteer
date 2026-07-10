@@ -5,3 +5,4 @@ artifacts/*.jac
 artifacts/*.ckpt
 uv.lock
 docs/reviews/*.raw.jsonl
+artifacts/*.safetensors
