@@ -34,9 +34,13 @@ def main() -> None:
     p.add_argument("--layers", type=float, nargs=2, default=(0.3, 0.9),
                    metavar=("LO", "HI"), help="fractional layer band to fit")
     p.add_argument("--max-seq-len", type=int, default=128)
+    p.add_argument("--out", default=None,
+                   help="cache path override; default config.cache_path(model). "
+                        "Use for dev/scratch fits so they don't clobber the canonical cache.")
     args = p.parse_args()
 
-    out = config.cache_path(args.model)
+    out = Path(args.out) if args.out else config.cache_path(args.model)
+    ckpt = out.with_suffix(".ckpt")
     logger.info(f"loading {args.model} ({config.DTYPE}) on {config.DEVICE}")
     tok = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
