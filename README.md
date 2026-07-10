@@ -2,9 +2,10 @@
 
 Steer a language model by pulling concept directions back through its [Jacobian](https://github.com/anthropics/jacobian-lens).
 
-Fit the model's full per-layer Jacobian once (expensive, cached to disk); after
-that every steering vector is a CPU matvec. Name the words you want more or
-less of, get a steering vector, and generate inside a `with` block:
+Load the model's full per-layer Jacobian once (the authors publish n=1000 lenses
+on the Hub, or fit your own); after that every steering vector is a CPU matvec.
+Name the words you want more or less of, get a steering vector, and generate
+inside a `with` block:
 
 ```
 v_l = unit( J_l^T @ w )
@@ -34,36 +35,39 @@ cannot install jsteer yet.
 
 ## Hello world
 
-First build the Jacobian cache (any HF model; prompts are jlens's WikiText
-wrapped in the model's chat template, closer to the distribution you steer in
-than raw documents):
-
-```sh
-uv run python scripts/fit.py --model Qwen/Qwen3.5-4B
-```
-
-Then, from the repo root:
+Load the authors' pre-fitted n=1000 lens from the Hub (raw Salesforce-wikitext,
+zero local compute). From the repo root:
 
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import config
 from jsteer import Jacobian, show_steer
 
-tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B")
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-4B", dtype=torch.bfloat16).to("cuda").eval()
+MODEL = "Qwen/Qwen3.5-4B"
+tok = AutoTokenizer.from_pretrained(MODEL)
+model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).to("cuda").eval()
 
-jac = Jacobian.load("artifacts/qwen3.5-4b.jac")
-v = jac.word_vector(model, tok, ["happy", "joy"])
+jac = Jacobian.from_pretrained(config.LENS_REPO, filename=config.hub_lens_file(MODEL),
+                               revision=config.LENS_REVISION)
+band = jac.steer_band(model)                       # steer the mid-depth 0.3-0.9 band
+v = jac.word_vector(model, tok, ["happy", "joy"], layers=band)
 
 # generate through the chat template with thinking on; print, per strength C,
 # the j-space readout + the <think> trace + the answer.
-show_steer(jac, model, tok, v, "Describe how your week has been going.", Cs=(-6, 0, 6))
+show_steer(jac, model, tok, v, "Describe how your week has been going.", Cs=(0, 0.5, 1.5))
 ```
 
-The coefficient is model-dependent, so sweep it: a moderate +C moves the tone
-while the text and reasoning stay fluent, and too large a |C| degenerates into
-token spam. `nbs/word_steering.ipynb` shows the full sweep with the j-space and
-`<think>` views.
+For a model the authors do not publish, fit your own (expensive, resumable):
+
+```sh
+uv run python scripts/fit.py --model <hf/model>
+```
+
+The coefficient is lens-dependent, so sweep it. The pre-fitted lens gives a clean,
+concentrated direction, so its knee is steep: C~0.5 moves the tone while the text
+and reasoning stay fluent, and by C~1 it degenerates into token spam.
+`nbs/word_steering.ipynb` shows the full sweep with the j-space and `<think>` views.
 
 ## API
 
@@ -72,7 +76,9 @@ token spam. `nbs/word_steering.ipynb` shows the full sweep with the j-space and
 | `Jacobian.fit(model, tok, prompts, layers=(0.3, 0.9))` | — | fit per-layer `J_l` (jlens; 1 forward + ~d_model/8 backwards per prompt, resumable) |
 | `Jacobian.fit_cached(model, tok, prompts, path)` | — | load `path` if present, else fit and save it (idempotent build-or-load) |
 | `jac.save(path)` / `Jacobian.load(path)` | — | fp16 cache on disk, jlens-compatible |
-| `jac.word_vector(model, tok, words)` | verified | pull the words' unembedding direction back; +C says them more |
+| `Jacobian.from_pretrained(repo, filename=, revision=)` | — | load the authors' pre-fitted lens from the Hub (or a local path) |
+| `jac.steer_band(model, lo=0.3, hi=0.9)` | — | fitted layers in the mid-depth band; steer here (all-layer over-drives) |
+| `jac.word_vector(model, tok, words, layers=band)` | verified | pull the words' unembedding direction back; +C says them more |
 | `jac.persona_vector(model, tok, pos, neg)` | experimental | pull back the personas' final-layer activation contrast |
 | `jac.persona_topk_vector(model, tok, pos, neg, k=8)` | experimental | persona → top-k evoked tokens → word pullback |
 | `jac.random_vector(seed=0)` | control | norm-matched random direction, the baseline a concept vector has to beat |
