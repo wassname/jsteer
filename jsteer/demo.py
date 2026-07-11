@@ -97,9 +97,10 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
                                     for s in gob.scores]).mean())
     body = '{"ans": ' + tok.decode(gob.sequences[0][fenc.input_ids.shape[1]:],
                                    skip_special_tokens=True)
-    body = body[:body.index("}") + 1] if "}" in body else body   # cut at first close
     try:                          # invalid JSON IS the signal (fried model can't close it)
-        obj = json.loads(body)
+        # raw_decode parses the first object and ignores trailing tokens, so an early
+        # `}` inside a string value doesn't truncate a valid object (json.loads would).
+        obj, _ = json.JSONDecoder().raw_decode(body)
         valid, chk_ok = True, obj.get("2+2") == 4
     except json.JSONDecodeError:
         valid, chk_ok = False, False
