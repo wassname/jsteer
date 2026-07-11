@@ -21,6 +21,14 @@ build `w`:
     persona_vector        w = h_bar(pos) - h_bar(neg)               EXPERIMENTAL*
     persona_topk_vector   w = top-k tokens of the pos-neg logit      EXPERIMENTAL
                           contrast (differ before top-k, else null)
+    persona_soft_vector   w = W_U^T (softmax contrast) -- topk's     EXPERIMENTAL
+                          full-vocab limit; a genuine cotangent
+    persona_topk/soft mask non-word-like tokens (emoji/specials) out of the
+    contrast: they are degenerate emit-targets (the emoji-spam failure mode).
+
+    persona_pinv_vector is NOT a pullback: h_bar(pos)-h_bar(neg) is a TANGENT
+    (an activation displacement), and J^T only transports cotangents
+    (gradients). It solves J_l delta = h_diff instead -- see its docstring.
 
     * persona-contrast vectors FAILED specificity controls in j-steer-dev
       (moved the target axis no more than an unrelated persona did). Shipped
@@ -48,6 +56,7 @@ from jlens.fitting import fit as _jlens_fit
 from jlens.hf import HFLensModel, from_hf
 from jlens.hooks import ActivationRecorder
 from jlens.lens import JacobianLens
+from jlens.vis import _meaningful_token_mask  # jlens's word-like vocab mask (cached)
 from loguru import logger
 from torch import Tensor
 from tqdm.auto import tqdm
@@ -57,6 +66,8 @@ from steering_lite.vector import Vector
 
 from .applies import (
     JacobianPersonaC,
+    JacobianPersonaPinvC,
+    JacobianPersonaSoftC,
     JacobianPersonaTopkC,
     JacobianWordC,
     RandomC,
@@ -289,8 +300,12 @@ class Jacobian:
         logits_pos = lm.unembed(h_pos.to(model.device).to(model.dtype)).float()
         logits_neg = lm.unembed(h_neg.to(model.device).to(model.dtype)).float()
         diff = logits_pos - logits_neg                           # [vocab]
-        top_pos = diff.topk(k)                                    # pos evokes > neg
-        top_neg = (-diff).topk(k)                                 # neg evokes > pos
+        # word-like tokens only: emoji/special/punct tokens are degenerate
+        # emit-targets -- steering toward them collapses generation into
+        # repeating them (the emoji-spam failure mode at higher C). (Claude)
+        wordlike = _meaningful_token_mask(tok, diff.shape[-1], diff.device)
+        top_pos = diff.masked_fill(~wordlike, -torch.inf).topk(k)     # pos evokes > neg
+        top_neg = (-diff).masked_fill(~wordlike, -torch.inf).topk(k)  # neg evokes > pos
         toks_pos = [tok.decode([i]) for i in top_pos.indices.tolist()]
         toks_neg = [tok.decode([i]) for i in top_neg.indices.tolist()]
         # SHOULD be persona-specific words (positive vs negative affect here), not
@@ -302,6 +317,87 @@ class Jacobian:
              - W_U[top_neg.indices].float().mean(0)).cpu()
         cfg = JacobianPersonaTopkC(layers=self._steer_layers(layers))
         return self.pullback(w, cfg)
+
+    def persona_soft_vector(self, model, tok, pos_prompts: list[str],
+                            neg_prompts: list[str], *, temperature: float = 1.0,
+                            layers=None, batch_size: int = 8) -> Vector:
+        """EXPERIMENTAL: persona_topk's full-vocab limit, and a genuine cotangent.
+
+            w = W_U^T (softmax(u_pos/T) - softmax(u_neg/T))
+
+        where u = unembedded persona mean. This is exactly the gradient wrt the
+        final residual of E_{t~p_pos}[log p(t|h)] - E_{t~p_neg}[log p(t|h)]
+        (each term's softmax-baseline E_p[W_U] cancels in the difference), so
+        unlike persona_vector's activation diff, J^T transports it legitimately.
+        Vs topk: no hard k=8 compression to the personas' most extreme tokens
+        (the over-literal "emit :-)" failure); every tone-correlated token
+        contributes, weighted by how much the personas disagree on it.
+        `temperature` subsumes k: low T -> topk-like sparsity, high T -> broad
+        support. Non-word-like tokens are masked out before the softmax, same
+        rationale as topk. Untested for specificity. (Claude)"""
+        lm = from_hf(model, tok)
+        h_pos = _h_bar_final(model, tok, pos_prompts, batch_size=batch_size, label="pos")
+        h_neg = _h_bar_final(model, tok, neg_prompts, batch_size=batch_size, label="neg")
+        W_U = model.lm_head.weight                                # [vocab, d]
+        u_pos = lm.unembed(h_pos.to(model.device).to(model.dtype)).float()
+        u_neg = lm.unembed(h_neg.to(model.device).to(model.dtype)).float()
+        wordlike = _meaningful_token_mask(tok, u_pos.shape[-1], u_pos.device)
+        p_pos = u_pos.masked_fill(~wordlike, -torch.inf).div(temperature).softmax(-1)
+        p_neg = u_neg.masked_fill(~wordlike, -torch.inf).div(temperature).softmax(-1)
+        Δp = p_pos - p_neg                                        # [vocab], sums to 0
+        # read your data: TV distance = how much the personas disagree about the
+        # next token at all. SHOULD be clearly > 0 (~0 => null contrast, same
+        # failure mode as topk's identical token sets); top tokens SHOULD be
+        # persona-specific words, not generic sentence-starters.
+        tv = 0.5 * float(Δp.abs().sum())
+        top_pos, top_neg = Δp.topk(8), (-Δp).topk(8)
+        logger.info(
+            f"j-thoughts (soft, T={temperature}) TV(p_pos, p_neg)={tv:.3f}\n"
+            f"    positive: {[tok.decode([i]) for i in top_pos.indices.tolist()]}\n"
+            f"    negative: {[tok.decode([i]) for i in top_neg.indices.tolist()]}")
+        w = (Δp @ W_U.float()).cpu()          # raw W_U rows, matching _word_cotangent
+        cfg = JacobianPersonaSoftC(layers=self._steer_layers(layers))
+        return self.pullback(w, cfg)
+
+    def persona_pinv_vector(self, model, tok, pos_prompts: list[str],
+                            neg_prompts: list[str], *, ridge: float = 1e-3,
+                            layers=None, batch_size: int = 8) -> Vector:
+        """EXPERIMENTAL: transport the persona contrast as a TANGENT, which it is.
+
+        h_diff = h_bar(pos) - h_bar(neg) is an activation DISPLACEMENT at the
+        final layer, not a gradient -- persona_vector's J^T h_diff pulls it back
+        as if it were a cotangent, a type error (only correct if J were
+        orthogonal). The right transport asks: which layer-l perturbation
+        delta pushes forward to h_diff?
+
+            delta_l = argmin |J_l delta - h_diff|^2 + lam |delta|^2
+                    = (J_l^T J_l + lam I)^{-1} J_l^T h_diff,  lam = ridge * mean diag(J^T J)
+
+        Ridge because the position-averaged J is ill-conditioned. If THIS still
+        fails specificity, the failure is the averaged Jacobian itself (it can't
+        carry contextual features), not the algebra. CPU fp32 against the cached
+        matrices, ~seconds per layer, no backward. (Claude)"""
+        h_pos = _h_bar_final(model, tok, pos_prompts, batch_size=batch_size, label="pos")
+        h_neg = _h_bar_final(model, tok, neg_prompts, batch_size=batch_size, label="neg")
+        h_diff = (h_pos - h_neg).float().cpu()
+        logger.info(f"h_bar_diff |pos|={h_pos.norm():.3f} |neg|={h_neg.norm():.3f} "
+                    f"|diff|={h_diff.norm():.3f}")
+        cfg = JacobianPersonaPinvC(layers=self._steer_layers(layers))
+        per_layer, residuals = {}, {}
+        eye = torch.eye(self.lens.d_model)
+        for l in cfg.layers:
+            J = self.lens.jacobians[l]                            # [d_out, d_in] fp32 cpu
+            JtJ = J.T @ J
+            lam = ridge * JtJ.diagonal().mean()
+            δ = torch.linalg.solve(JtJ + lam * eye, J.T @ h_diff)
+            per_layer[l] = δ
+            residuals[l] = float((J @ δ - h_diff).norm() / h_diff.norm())
+        # SHOULD be well below 1.0 at most layers: 1.0 means J can't realize
+        # h_diff at all (h_diff orthogonal to J's row space) and the vector is
+        # ridge-noise; small residual means the transport is faithful.
+        logger.info("pinv relative residual |J d - h|/|h| per layer: " +
+                    " ".join(f"{l}:{residuals[l]:.2f}" for l in cfg.layers))
+        return _to_vector(cfg, per_layer)
 
     def random_vector(self, *, seed: int = 0, layers=None) -> Vector:
         """Norm-matched control: unit random direction per layer. Any honest
@@ -323,7 +419,6 @@ class Jacobian:
         `mask_wordlike` reuses jlens's own word-like vocab mask so the readout
         hides punctuation/single-char/special tokens (which, per the walkthrough,
         trail the interesting word tokens on Qwen); ranks are unaffected."""
-        from jlens.vis import _meaningful_token_mask
         lm = from_hf(model, tok)
         lens_logits, _, _ = self.lens.apply(lm, prompt, layers=[layer],
                                             positions=[position])

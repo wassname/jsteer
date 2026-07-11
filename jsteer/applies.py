@@ -30,6 +30,8 @@ Sign conventions (set by the cotangent in jacobian.py):
     jacobian_word          +C raises the words' output logits
     jacobian_persona       +C moves toward the POS persona
     jacobian_persona_topk  +C moves toward the POS persona's evoked vocabulary
+    jacobian_persona_soft  +C moves toward the POS persona's next-token dist
+    jacobian_persona_pinv  +C moves toward the POS persona (tangent transport)
     random                 norm-matched control, no meaning
 """
 from __future__ import annotations
@@ -71,6 +73,24 @@ class JacobianPersonaC(SteeringConfig):
 @dataclass
 class JacobianPersonaTopkC(SteeringConfig):
     method: str = "jacobian_persona_topk"
+    normalize: bool = True
+    apply_mode: str = "add"
+    apply_span: int = 1
+
+
+@register_config
+@dataclass
+class JacobianPersonaSoftC(SteeringConfig):
+    method: str = "jacobian_persona_soft"
+    normalize: bool = True
+    apply_mode: str = "add"
+    apply_span: int = 1
+
+
+@register_config
+@dataclass
+class JacobianPersonaPinvC(SteeringConfig):
+    method: str = "jacobian_persona_pinv"
     normalize: bool = True
     apply_mode: str = "add"
     apply_span: int = 1
@@ -170,5 +190,6 @@ def _register_method(method_name: str) -> None:
         apply = staticmethod(apply_dispatch)
 
 
-for _name in ("jacobian_word", "jacobian_persona", "jacobian_persona_topk", "random"):
+for _name in ("jacobian_word", "jacobian_persona", "jacobian_persona_topk",
+              "jacobian_persona_soft", "jacobian_persona_pinv", "random"):
     _register_method(_name)
