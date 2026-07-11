@@ -36,7 +36,7 @@ fig = plot_sweep(rows, title="joy steer: rubric ans vs C (colored by coherence)"
 fig.savefig(OUT, dpi=110, bbox_inches="tight")
 logger.info(f"wrote {OUT}")
 
-# UAT: the sweep must contain BOTH coherent (valid_frac=1) and incoherent (red-edge)
+# UAT: the sweep must contain BOTH coherent (low rep) and degenerate (red-edge)
 # rows, so the plot shows the dose-response AND the breakdown edge.
 coh = [r for r in rows if r["coherent"]]
 inc = [r for r in rows if not r["coherent"]]

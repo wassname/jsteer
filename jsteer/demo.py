@@ -11,7 +11,6 @@ output is debuggable and nothing is parsed or reconstructed.
 from __future__ import annotations
 
 import dataclasses
-import json
 
 import torch
 from jlens.vis import _meaningful_token_mask
@@ -36,39 +35,42 @@ def _cthulhu_say(text: str) -> str:
 
 
 # think-then-answer rubric read: the demo's one-number sanity signal that steering
-# moved the target axis. Same mechanism as moral-maps guided.py (let the model
-# think, then read the logprobs at a JSON answer slot), reduced to a single scalar.
-# The object carries a trivial-arithmetic canary ("2+2") and a free-text field so a
-# steer-degraded model has ROOM to break the object -- coherence is measured on the
-# free-generated object, not on the forced digit slot (which is ~always a digit
-# because the `{"ans": ` prefix makes one obvious). (Claude)
-_ANS_FMT = (' Think it over, then answer with ONE line of JSON and nothing after it:'
-            ' {"ans": N, "why": "<=3 words", "2+2": M} where N is a single digit from'
-            ' 0 (least) to 9 (most) and M is the value of 2+2.')
+# moved the target axis. Same mechanism as moral-maps guided.py (let the model think,
+# then read the logprobs at a JSON answer slot), reduced to a single scalar. (Claude)
+_ANS_FMT = (' Think it over, then answer with JSON {"ans": N} where N is a single'
+            ' digit from 0 (least) to 9 (most).')
+
+# Coherence = repetition of the think trace, NOT a forced-object gate. Every steer
+# breakdown we observed is a REPETITION loop ("happy and happy...", wedding-jewelry,
+# "favorite books..."), so 1 - distinct-3 is the natural, simple coherence signal (and
+# it catches long-generation degeneration that a short forced JSON object survives).
+# Threshold from the empirical gap in scripts/scratch/rep_metric_check.py over 40+ real
+# generations: coherent reasoning scores rep3 < ~0.3, degenerate loops > ~0.6.
+REP_COHERENT_MAX = 0.35
+
+
+def _rep_frac(text: str, n: int = 3) -> float:
+    """1 - distinct-n over whitespace tokens: 0 = all n-grams unique (fluent), ->1 as
+    the text collapses into a repeated loop (steer degeneration)."""
+    toks = text.split()
+    if len(toks) < n + 1:
+        return 0.0
+    ngrams = list(zip(*[toks[i:] for i in range(n)]))
+    return 1.0 - len(set(ngrams)) / len(ngrams)
 
 
 @torch.no_grad()
 def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
-                 do_sample: bool = False, temperature: float = 0.7) -> tuple[float, dict]:
-    """Ask `rubric`, let the model think, force the slot `{"ans": ` for a clean scalar
-    read, then FREE-GENERATE the rest of the JSON object as a coherence probe.
-    Returns (expected, coh).
+                 do_sample: bool = False, temperature: float = 0.7) -> tuple[float, float]:
+    """Ask `rubric`, let the model think, then force the slot `{"ans": ` and read the
+    logprob-weighted expected digit. Returns (expected, rep) where:
 
     expected = sum_d d * softmax(logit_d over the 10 digit tokens) at the forced slot
     -- a continuous scalar from single-token logprobs (cleaner than parsing a float).
-
-    coh = {"valid", "chk_ok", "span_pmass"} measured on the free-generated object:
-      valid      -- the object parses as JSON (a steer-fried model fails to close it),
-      chk_ok     -- its "2+2" field == 4 (trivial-arithmetic canary),
-      span_pmass -- mean top-1 softmax prob over the generated span. It degrades in the
-                    COHERENT regime (~0.95 -> 0.81 as the steer bites) but is NOT a
-                    coherence measure on its own: a steer-fried model collapses into a
-                    confident degenerate loop, so span_pmass climbs back toward ~1 on
-                    repeated garbage (observed valid=False, span_pmass=0.97 at C=3.0).
-                    Coherence therefore GATES on (valid and chk_ok); span_pmass is only
-                    a within-coherent confidence read, trustworthy where valid is True.
-    The rigorous K-way, position-debiased version is moral-maps guided.py; this is
-    the demo's cheap readout, scored under whatever steering is active."""
+    rep = 1 - distinct-3 of the think trace -- the coherence signal. Low (~0.05) while
+    the model reasons fluently, ->1 when steering degenerates it into a repeat loop.
+    We measure coherence on the long think trace (which degenerates under steering),
+    not on the short forced answer (which stays scorable well past the breakdown)."""
     prompt = chat_input(tok, rubric + _ANS_FMT)
     enc = tok(prompt, return_tensors="pt").to(model.device)
     torch.manual_seed(seed)
@@ -88,23 +90,7 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
     ids = torch.tensor([tok(str(d), add_special_tokens=False).input_ids[0]
                         for d in range(10)], device=logits.device)
     expected = float((logits[ids].softmax(0) * torch.arange(10., device=ids.device)).sum())
-
-    # free-generate the rest of the object; short cap so incoherence shows fast
-    gob = model.generate(**fenc, max_new_tokens=20, do_sample=False,
-                         pad_token_id=tok.eos_token_id,
-                         output_scores=True, return_dict_in_generate=True)
-    span_pmass = float(torch.stack([s[0].float().softmax(-1).max()
-                                    for s in gob.scores]).mean())
-    body = '{"ans": ' + tok.decode(gob.sequences[0][fenc.input_ids.shape[1]:],
-                                   skip_special_tokens=True)
-    try:                          # invalid JSON IS the signal (fried model can't close it)
-        # raw_decode parses the first object and ignores trailing tokens, so an early
-        # `}` inside a string value doesn't truncate a valid object (json.loads would).
-        obj, _ = json.JSONDecoder().raw_decode(body)
-        valid, chk_ok = True, obj.get("2+2") == 4
-    except json.JSONDecodeError:
-        valid, chk_ok = False, False
-    return expected, {"valid": valid, "chk_ok": chk_ok, "span_pmass": span_pmass}
+    return expected, _rep_frac(think)
 
 
 @torch.no_grad()
@@ -112,26 +98,24 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
                     max_steps: int = 15, n_samples: int = 3,
                     temperature: float = 0.7, max_new_tokens: int = 512) -> list[dict]:
     """Walk C outward from 0 in +/- directions, scoring the rubric each step, and STOP a
-    direction the step AFTER the model can no longer emit a valid answer object (the
-    majority of seeds fail JSON-parse or the "2+2" canary). Maps the coherent dose-
-    response of the steered axis without hand-picking Cs. Returns rows sorted by C:
-    {"C","ans","ans_std","span_pmass","valid_frac","coherent"}. Each C is averaged over
-    `n_samples` think traces (seeds 0..n-1) to tame single-sample answer noise -- a
-    lightweight stand-in for guided.py's Bayesian model averaging; ans_std is the spread.
-    Coherence = the model still free-generates a well-formed object AND gets 2+2 right;
-    span_pmass grades its confidence. This breaks well before free-form fluency does at
-    large |C|, so read the qualitative show_steer for the long-generation frailty."""
+    direction the step AFTER the think trace degenerates (mean rep >= REP_COHERENT_MAX,
+    i.e. it collapses into a repeat loop). Maps the coherent dose-response of the steered
+    axis without hand-picking Cs. Returns rows sorted by C:
+    {"C","ans","ans_std","rep","coherent"}. Each C is averaged over `n_samples` think
+    traces (seeds 0..n-1) to tame single-sample noise -- a lightweight stand-in for
+    guided.py's Bayesian model averaging; ans_std is the spread. rep = 1 - distinct-3 of
+    the think trace catches the actual failure mode (repetition), unlike a short forced
+    object that stays scorable past the breakdown."""
     def score(C):
         with vec(model, C=C):
             pairs = [rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens, seed=s,
                                   do_sample=n_samples > 1, temperature=temperature)
                      for s in range(n_samples)]
         anss = torch.tensor([e for e, _ in pairs])
-        span = float(torch.tensor([c["span_pmass"] for _, c in pairs]).mean())
-        valid_frac = sum(c["valid"] and c["chk_ok"] for _, c in pairs) / len(pairs)
+        rep = float(torch.tensor([r for _, r in pairs]).mean())
         return {"C": round(float(C), 3), "ans": float(anss.mean()),
-                "ans_std": float(anss.std(unbiased=False)), "span_pmass": span,
-                "valid_frac": valid_frac, "coherent": valid_frac >= 0.5}
+                "ans_std": float(anss.std(unbiased=False)), "rep": rep,
+                "coherent": rep < REP_COHERENT_MAX}
     rows = [score(0.0)]
     for d in (step, -step):                      # outward each way; keep the 1st incoherent point
         C = d
@@ -146,23 +130,21 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
 
 
 def plot_sweep(rows: list[dict], *, title: str = "rubric ans vs C"):
-    """ans vs C, points colored by coherence = valid_frac (fraction of seeds that emit
-    a well-formed {"ans",...,"2+2"} object with 2+2==4); points below majority also get
-    a red edge. Coherence is NEAR-BINARY (flat while the model holds, a cliff when it
-    breaks), so the color reads as a gate and the ans curve carries the dose-response.
-    We deliberately do NOT color by span_pmass: a steer-fried model collapses into a
-    confident degenerate loop (span_pmass climbs back toward 1 on repeated garbage), so
-    peakiness is not coherence -- valid_frac is what can't be fooled by confident junk."""
+    """ans vs C, points colored by think-trace repetition (rep = 1 - distinct-3);
+    degenerate points (rep >= REP_COHERENT_MAX) also get a red edge. Low rep = fluent
+    reasoning (bright), high rep = the steer has collapsed the trace into a repeat loop
+    (dark + red edge). The ans curve carries the dose-response; rep marks where to stop
+    trusting it. Colorbar is inverted (viridis_r) so brighter = more coherent."""
     import matplotlib.pyplot as plt
     Cs = [r["C"] for r in rows]
     ans = [r["ans"] for r in rows]
-    coh = [r["valid_frac"] for r in rows]
+    rep = [r["rep"] for r in rows]
     fig, ax = plt.subplots(figsize=(5, 3))
     ax.plot(Cs, ans, "-", color="0.8", lw=1, zorder=1)
     if all("ans_std" in r for r in rows):
         ax.errorbar(Cs, ans, yerr=[r["ans_std"] for r in rows], fmt="none",
                     ecolor="0.6", capsize=2, lw=1, zorder=1)
-    sc = ax.scatter(Cs, ans, c=coh, cmap="viridis", vmin=0.0, vmax=1.0,
+    sc = ax.scatter(Cs, ans, c=rep, cmap="viridis_r", vmin=0.0, vmax=1.0,
                     zorder=2, edgecolor=["0.2" if r["coherent"] else "red" for r in rows],
                     linewidth=1.2)
     ax.axvline(0, color="0.85", lw=0.8, zorder=0)
@@ -170,7 +152,8 @@ def plot_sweep(rows: list[dict], *, title: str = "rubric ans vs C"):
     ax.set_ylabel("rubric ans (0-9)")
     ax.set_ylim(-0.3, 9.3)
     ax.set_title(title)
-    fig.colorbar(sc, ax=ax, label="coherence (valid-object fraction)")
+    cbar = fig.colorbar(sc, ax=ax, label="think-trace repetition (1 - distinct-3)")
+    cbar.ax.axhline(REP_COHERENT_MAX, color="red", lw=1)   # the degeneration cutoff
     fig.tight_layout()
     return fig
 
@@ -280,8 +263,8 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                  _cthulhu_say(readout), gen]
         if ans is not None:
             # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
-            # json=False or 2+2!=4 => the steer broke the model, distrust the number.
-            e, c = ans
-            block.append(f"  rubric ans≈{e:.2f}/9  (json={c['valid']} 2+2ok={c['chk_ok']}"
-                         f" conf={c['span_pmass']:.2f})")
+            # rep>=0.35 => the think trace degenerated into a loop, distrust the number.
+            e, rep = ans
+            block.append(f"  rubric ans≈{e:.2f}/9  (rep={rep:.2f}"
+                         f"{' DEGENERATE' if rep >= REP_COHERENT_MAX else ''})")
         logger.info("\n".join(block) + "\n")

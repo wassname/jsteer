@@ -35,13 +35,12 @@ nonzero = [r for r in rows if r["ans_std"] > 0]
 logger.info(f"\nUAT1: rows with ans_std>0 = {len(nonzero)}/{len(rows)}  "
             f"(SHOULD be >0 -> sampling+BMA active)")
 
-# UAT 2: the JSON coherence probe discriminates. At C=0 the model emits a valid object
-# (valid_frac=1, high span_pmass); walking |C| out, span_pmass falls and the sweep stops
-# at an incoherent boundary. If C=0 is already incoherent OR span_pmass never falls, the
+# UAT 2: the repetition coherence probe discriminates. At C=0 the think trace is fluent
+# (rep low, coherent True); walking |C| out, rep rises past REP_COHERENT_MAX and the sweep
+# stops at a degenerate boundary. If C=0 is already incoherent OR rep never rises, the
 # probe isn't measuring coherence -> broken.
 c0 = next(r for r in rows if r["C"] == 0.0)
-span0 = c0["span_pmass"]
 edge = [r for r in rows if not r["coherent"]]
-logger.info(f"\nUAT2: C=0 valid_frac={c0['valid_frac']:+.2f} span_pmass={span0:+.2f} "
-            f"(SHOULD valid_frac=1, span high); incoherent boundary rows={len(edge)} "
+logger.info(f"\nUAT2: C=0 rep={c0['rep']:+.2f} coherent={c0['coherent']} "
+            f"(SHOULD rep low, coherent True); degenerate boundary rows={len(edge)} "
             f"at C={[r['C'] for r in edge]} (SHOULD be >=1 -> sweep found a real edge)")
