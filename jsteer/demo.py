@@ -47,12 +47,23 @@ def _cthulhu_say(text: str) -> str:
 REP_COHERENT_MAX = 0.35
 
 
+# a point is coherent iff the reasoning trace is fluent (rep < REP_COHERENT_MAX AND long
+# enough) AND the model actually committed to one of the answer tokens (ans_mass high).
+# The second gate matters for open readouts like YESNO: under hard steering the forced
+# slot's top token is often NOT an answer token at all (observed 'imers', '信ażć', '(') --
+# the value read over just the answer logits is then meaningless. (Not needed for DIGIT,
+# whose JSON prefix forces a digit, so ans_mass ~ 1 there.)
+ANS_MASS_MIN = 0.5
+_MIN_TRACE_WORDS = 8
+
+
 def _rep_frac(text: str, n: int = 3) -> float:
-    """1 - distinct-n over whitespace tokens: 0 = all n-grams unique (fluent), ->1 as
-    the text collapses into a repeated loop (steer degeneration)."""
+    """1 - distinct-n over whitespace tokens: ~0 = all n-grams unique (fluent), ->1 as
+    the text collapses into a repeated loop. A trace too short to reason (< _MIN_TRACE_WORDS,
+    e.g. a 1-word stub under hard steering) counts as fully degenerate (1.0), not fluent."""
     toks = text.split()
-    if len(toks) < n + 1:
-        return 0.0
+    if len(toks) < _MIN_TRACE_WORDS:
+        return 1.0
     ngrams = list(zip(*[toks[i:] for i in range(n)]))
     return 1.0 - len(set(ngrams)) / len(ngrams)
 
@@ -73,17 +84,19 @@ YESNO = dict(fmt=' Think it over, then give your final answer as one word, YES o
 @torch.no_grad()
 def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
                  do_sample: bool = False, temperature: float = 0.7,
-                 readout: dict = DIGIT) -> tuple[float, float]:
+                 readout: dict = DIGIT) -> tuple[float, float, float]:
     """Ask `rubric`, let the model think, then force `readout['prefix']` and read the
-    logprob-weighted answer. Returns (expected, rep) where:
+    logprob-weighted answer. Returns (expected, rep, ans_mass) where:
 
     expected = sum_i value_i * softmax(logit_i over readout['tokens']) at the forced slot
     -- a continuous scalar from single-token logprobs. DIGIT -> expected 0-9 rubric digit;
     YESNO -> P(YES) for a binary dilemma.
-    rep = 1 - distinct-3 of the think trace -- the coherence signal. Low (~0.05) while the
-    model reasons fluently, ->1 when steering degenerates it into a repeat loop. We measure
-    coherence on the long think trace (which degenerates under steering), not on the short
-    forced answer (which stays scorable well past the breakdown)."""
+    rep = 1 - distinct-3 of the think trace -- fluency: ~0 while the model reasons, ->1
+    when steering degenerates it into a repeat loop (or a too-short stub).
+    ans_mass = full-vocab softmax mass on the answer tokens -- did the model actually
+    COMMIT to an answer? Under hard steering the forced slot's top token is often not an
+    answer token ('imers', '信任', '('), so expected is meaningless; low ans_mass flags it.
+    Coherence needs BOTH rep low and ans_mass high (see coherence_sweep)."""
     prompt = chat_input(tok, rubric + readout["fmt"])
     enc = tok(prompt, return_tensors="pt").to(model.device)
     torch.manual_seed(seed)
@@ -104,7 +117,8 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
                         for t in readout["tokens"]], device=logits.device)
     vals = torch.tensor(readout["values"], device=logits.device, dtype=torch.float)
     expected = float((logits[ids].softmax(0) * vals).sum())
-    return expected, _rep_frac(think)
+    ans_mass = float(logits.softmax(0)[ids].sum())      # did it commit to an answer token?
+    return expected, _rep_frac(think), ans_mass
 
 
 @torch.no_grad()
@@ -112,25 +126,25 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
                     max_steps: int = 15, n_samples: int = 3, readout: dict = DIGIT,
                     temperature: float = 0.7, max_new_tokens: int = 512) -> list[dict]:
     """Walk C outward from 0 in +/- directions, scoring the rubric each step, and STOP a
-    direction the step AFTER the think trace degenerates (mean rep >= REP_COHERENT_MAX,
-    i.e. it collapses into a repeat loop). Maps the coherent dose-response of the steered
-    axis without hand-picking Cs. Returns rows sorted by C:
-    {"C","ans","ans_std","rep","coherent"}. Each C is averaged over `n_samples` think
-    traces (seeds 0..n-1) to tame single-sample noise -- a lightweight stand-in for
-    guided.py's Bayesian model averaging; ans_std is the spread. rep = 1 - distinct-3 of
-    the think trace catches the actual failure mode (repetition), unlike a short forced
-    object that stays scorable past the breakdown."""
+    direction the step AFTER the point goes INCOHERENT. Coherent = the think trace is fluent
+    (mean rep < REP_COHERENT_MAX) AND the model committed to an answer token (mean ans_mass
+    > ANS_MASS_MIN). Both are needed: under hard steering the trace can stay non-repetitive
+    while the forced answer slot emits a non-answer token, making `ans` meaningless. Maps
+    the coherent dose-response without hand-picking Cs. Returns rows sorted by C:
+    {"C","ans","ans_std","rep","ans_mass","coherent"}. Each C is averaged over `n_samples`
+    think traces (seeds 0..n-1); ans_std is the spread."""
     def score(C):
         with vec(model, C=C):
-            pairs = [rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens, seed=s,
-                                  do_sample=n_samples > 1, temperature=temperature,
-                                  readout=readout)
-                     for s in range(n_samples)]
-        anss = torch.tensor([e for e, _ in pairs])
-        rep = float(torch.tensor([r for _, r in pairs]).mean())
+            triples = [rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens, seed=s,
+                                    do_sample=n_samples > 1, temperature=temperature,
+                                    readout=readout)
+                       for s in range(n_samples)]
+        anss = torch.tensor([e for e, _, _ in triples])
+        rep = float(torch.tensor([r for _, r, _ in triples]).mean())
+        ans_mass = float(torch.tensor([m for _, _, m in triples]).mean())
         return {"C": round(float(C), 3), "ans": float(anss.mean()),
-                "ans_std": float(anss.std(unbiased=False)), "rep": rep,
-                "coherent": rep < REP_COHERENT_MAX}
+                "ans_std": float(anss.std(unbiased=False)), "rep": rep, "ans_mass": ans_mass,
+                "coherent": rep < REP_COHERENT_MAX and ans_mass > ANS_MASS_MIN}
     rows = [score(0.0)]
     for d in (step, -step):                      # outward each way; keep the 1st incoherent point
         C = d
@@ -278,8 +292,9 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                  _cthulhu_say(readout), gen]
         if ans is not None:
             # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
-            # rep>=0.35 => the think trace degenerated into a loop, distrust the number.
-            e, rep = ans
-            block.append(f"  rubric ans≈{e:.2f}/9  (rep={rep:.2f}"
-                         f"{' DEGENERATE' if rep >= REP_COHERENT_MAX else ''})")
+            # rep>=0.35 (loop) or ans_mass<0.5 (didn't commit to an answer) => distrust it.
+            e, rep, am = ans
+            bad = rep >= REP_COHERENT_MAX or am < ANS_MASS_MIN
+            block.append(f"  rubric ans≈{e:.2f}  (rep={rep:.2f} ans_mass={am:.2f}"
+                         f"{' DEGENERATE' if bad else ''})")
         logger.info("\n".join(block) + "\n")
