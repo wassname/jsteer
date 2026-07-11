@@ -1,5 +1,44 @@
 # Overnight: which steering mechanisms work + simplification plan
 
+## MORNING UPDATE (supersedes the optimism-rubric findings below)
+
+wassname asked for a better question (a real task, not rating an unknown project) and to
+just measure everything. Switched to a self-honesty moral dilemma with a YES/NO readout
+(P(YES) = say you were sick / lie), honesty axis (deceptive vs honest personas). Reading
+the traces exposed the readout was returning ARTIFACTS under steering: at |C|>=1 the model
+emits a non-answer token at the slot ('imers', 'lie', '信任', '(') or a 1-word degenerate
+stub, and the naive P(YES) over just {NO,YES} logits is meaningless there. Fixed with a
+DUAL coherence gate: a point counts only if the reasoning is fluent (rep<0.35, trace>=8
+words) AND the model committed to an answer token (ans_mass>0.5).
+
+Master table, dilemma, dual-gated (P(YES=lie) over the TRUSTWORTHY coherent window only):
+
+| method         | coherent window | P(lie)@0 | P(lie)@+edge | note |
+|----------------|-----------------|----------|--------------|------|
+| persona_pinv   | -0.3 .. +1.2    | 0.07     | 0.15         | STANDOUT: stays coherent+committed across a wide C, mild real rise |
+| meandiff(base) | -0.3 .. +0.3    | 0.07     | 0.08         | narrow, ~flat |
+| persona_soft   | -0.3 .. 0       | 0.07     | 0.07         | narrow, flat |
+| persona_vector | 0 .. +0.3       | 0.07     | 0.07         | narrow, flat |
+| word(lie)      | 0 only          | 0.07     | -            | ans_mass collapses to 0.01 at +0.3 (stops answering) |
+| persona_topk   | 0 only          | 0.07     | -            | ans_mass 0.46 at +0.3 (borderline, stops committing) |
+| random(null)   | -1.2 .. +0.6    | 0.07     | 0.05         | flat null (correct) |
+
+Honest bottom line: on a moral DECISION (not just tone), aggressive steers break the
+model's ability to answer before they move the decision. persona_pinv is the only method
+that keeps the model coherent + committed across a wide C range, with a modest real effect
+(P(lie) 0.07 -> 0.15). This matches the optimism axis where persona_pinv also had the
+widest coherent window -- it is the gentlest, most robust extractor. The big P(lie) shifts
+seen before the gate were artifacts.
+
+Caveats: n=2 seeds; ans_mass>0.5 threshold and the answer tokens (' YES'/' NO') are a knob
+(a model that answers "Yes"/"**NO**"/after more reasoning is under-credited); effects are
+modest, not a dramatic flip. Instrument commits: a233e3a (readout), 6a080db (dual gate).
+Evidence: artifacts/measure_all.jsonl, scripts/scratch/{measure_all,validate_traces}.py.
+
+---
+
+## (superseded) original optimism-rubric findings
+
 Claude, for wassname. Evidence links at the bottom. Epistemic status: method ranking
 rests on my manual reading of the demo generations (n=1 sample per C in the notebooks,
 n=2-3 in the eval), cross-checked against an objective repetition metric. Directions are
