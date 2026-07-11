@@ -1,5 +1,6 @@
-"""Smoke: coherence_sweep with sampling on -> ans_std should be >0 (BMA averages over
-distinct think traces). (Claude) max_steps=2 keeps it to ~5 C points for speed.
+"""Smoke: coherence_sweep with the JSON-object coherence probe. (Claude)
+max_steps=3 walks C out until the model can no longer emit a valid {"ans",...,"2+2"}
+object. Two UATs below. max_new_tokens=384 keeps it fast.
 
     uv run python scripts/scratch/smoke_sweep.py
 """
@@ -26,10 +27,21 @@ v = jac.word_vector(model, tok, ["happy", "joy"], layers=band)
 
 rows = coherence_sweep(model, tok, v,
                        "On a scale of 0 (bleak) to 9 (joyful), how is your outlook on the week?",
-                       step=0.1, pmass_floor=0.9, max_steps=2, n_samples=3, max_new_tokens=384)
+                       step=0.1, max_steps=3, n_samples=3, max_new_tokens=384)
 logger.info("\n" + tabulate(rows, headers="keys", tablefmt="github", floatfmt="+.2f"))
-# SHOULD: with do_sample the 3 seeds diverge, so at least one coherent row has ans_std>0.
-# If ALL ans_std==0, sampling isn't taking effect (still greedy) -> BMA is a no-op.
+
+# UAT 1: sampling+BMA active -> the 3 seeds diverge, so >=1 row has ans_std>0.
 nonzero = [r for r in rows if r["ans_std"] > 0]
-logger.info(f"\nUAT: rows with ans_std>0 = {len(nonzero)}/{len(rows)}  "
+logger.info(f"\nUAT1: rows with ans_std>0 = {len(nonzero)}/{len(rows)}  "
             f"(SHOULD be >0 -> sampling+BMA active)")
+
+# UAT 2: the JSON coherence probe discriminates. At C=0 the model emits a valid object
+# (valid_frac=1, high span_pmass); walking |C| out, span_pmass falls and the sweep stops
+# at an incoherent boundary. If C=0 is already incoherent OR span_pmass never falls, the
+# probe isn't measuring coherence -> broken.
+c0 = next(r for r in rows if r["C"] == 0.0)
+span0 = c0["span_pmass"]
+edge = [r for r in rows if not r["coherent"]]
+logger.info(f"\nUAT2: C=0 valid_frac={c0['valid_frac']:+.2f} span_pmass={span0:+.2f} "
+            f"(SHOULD valid_frac=1, span high); incoherent boundary rows={len(edge)} "
+            f"at C={[r['C'] for r in edge]} (SHOULD be >=1 -> sweep found a real edge)")
