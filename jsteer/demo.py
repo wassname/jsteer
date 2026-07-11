@@ -36,9 +36,7 @@ def _cthulhu_say(text: str) -> str:
 
 # think-then-answer rubric read: the demo's one-number sanity signal that steering
 # moved the target axis. Same mechanism as moral-maps guided.py (let the model think,
-# then read the logprobs at a JSON answer slot), reduced to a single scalar. (Claude)
-_ANS_FMT = (' Think it over, then answer with JSON {"ans": N} where N is a single'
-            ' digit from 0 (least) to 9 (most).')
+# then read the logprobs at a forced answer slot), reduced to a single scalar. (Claude)
 
 # Coherence = repetition of the think trace, NOT a forced-object gate. Every steer
 # breakdown we observed is a REPETITION loop ("happy and happy...", wedding-jewelry,
@@ -59,19 +57,34 @@ def _rep_frac(text: str, n: int = 3) -> float:
     return 1.0 - len(set(ngrams)) / len(ngrams)
 
 
+# a readout = (format suffix appended to the question, forced slot after </think>, the
+# answer tokens to read logprobs over, and the scalar value each maps to). DIGIT is the
+# 0-9 rubric; YESNO reads P(YES) for a binary dilemma (a real decision, not a self-rating
+# the model refuses to give). expected = sum_i value_i * softmax(logit over answer tokens).
+DIGIT = dict(fmt=' Think it over, then answer with JSON {"ans": N} where N is a single'
+                 ' digit from 0 (least) to 9 (most).',
+             prefix='</think>\n{"ans": ',
+             tokens=[str(d) for d in range(10)], values=list(range(10)))
+YESNO = dict(fmt=' Think it over, then give your final answer as one word, YES or NO.',
+             prefix='</think>\nFinal answer: ',
+             tokens=[' NO', ' YES'], values=[0.0, 1.0])   # expected = P(YES)
+
+
 @torch.no_grad()
 def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
-                 do_sample: bool = False, temperature: float = 0.7) -> tuple[float, float]:
-    """Ask `rubric`, let the model think, then force the slot `{"ans": ` and read the
-    logprob-weighted expected digit. Returns (expected, rep) where:
+                 do_sample: bool = False, temperature: float = 0.7,
+                 readout: dict = DIGIT) -> tuple[float, float]:
+    """Ask `rubric`, let the model think, then force `readout['prefix']` and read the
+    logprob-weighted answer. Returns (expected, rep) where:
 
-    expected = sum_d d * softmax(logit_d over the 10 digit tokens) at the forced slot
-    -- a continuous scalar from single-token logprobs (cleaner than parsing a float).
-    rep = 1 - distinct-3 of the think trace -- the coherence signal. Low (~0.05) while
-    the model reasons fluently, ->1 when steering degenerates it into a repeat loop.
-    We measure coherence on the long think trace (which degenerates under steering),
-    not on the short forced answer (which stays scorable well past the breakdown)."""
-    prompt = chat_input(tok, rubric + _ANS_FMT)
+    expected = sum_i value_i * softmax(logit_i over readout['tokens']) at the forced slot
+    -- a continuous scalar from single-token logprobs. DIGIT -> expected 0-9 rubric digit;
+    YESNO -> P(YES) for a binary dilemma.
+    rep = 1 - distinct-3 of the think trace -- the coherence signal. Low (~0.05) while the
+    model reasons fluently, ->1 when steering degenerates it into a repeat loop. We measure
+    coherence on the long think trace (which degenerates under steering), not on the short
+    forced answer (which stays scorable well past the breakdown)."""
+    prompt = chat_input(tok, rubric + readout["fmt"])
     enc = tok(prompt, return_tensors="pt").to(model.device)
     torch.manual_seed(seed)
     # this model ships no generation_config, so generate() is greedy by default: seeds
@@ -84,18 +97,19 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
     out = model.generate(**enc, **gen_kw)
     think = tok.decode(out[0][enc.input_ids.shape[1]:],
                        skip_special_tokens=False).split("</think>")[0]
-    forced = prompt + think + '</think>\n{"ans": '            # our own deterministic slot
+    forced = prompt + think + readout["prefix"]              # our own deterministic slot
     fenc = tok(forced, return_tensors="pt").to(model.device)
     logits = model(**fenc).logits[0, -1].float()
-    ids = torch.tensor([tok(str(d), add_special_tokens=False).input_ids[0]
-                        for d in range(10)], device=logits.device)
-    expected = float((logits[ids].softmax(0) * torch.arange(10., device=ids.device)).sum())
+    ids = torch.tensor([tok(t, add_special_tokens=False).input_ids[0]
+                        for t in readout["tokens"]], device=logits.device)
+    vals = torch.tensor(readout["values"], device=logits.device, dtype=torch.float)
+    expected = float((logits[ids].softmax(0) * vals).sum())
     return expected, _rep_frac(think)
 
 
 @torch.no_grad()
 def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
-                    max_steps: int = 15, n_samples: int = 3,
+                    max_steps: int = 15, n_samples: int = 3, readout: dict = DIGIT,
                     temperature: float = 0.7, max_new_tokens: int = 512) -> list[dict]:
     """Walk C outward from 0 in +/- directions, scoring the rubric each step, and STOP a
     direction the step AFTER the think trace degenerates (mean rep >= REP_COHERENT_MAX,
@@ -109,7 +123,8 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
     def score(C):
         with vec(model, C=C):
             pairs = [rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens, seed=s,
-                                  do_sample=n_samples > 1, temperature=temperature)
+                                  do_sample=n_samples > 1, temperature=temperature,
+                                  readout=readout)
                      for s in range(n_samples)]
         anss = torch.tensor([e for e, _ in pairs])
         rep = float(torch.tensor([r for _, r in pairs]).mean())
