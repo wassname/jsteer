@@ -54,8 +54,11 @@ band = jac.steer_band(model)                       # steer the mid-depth 0.3-0.9
 v = jac.word_vector(model, tok, ["happy", "joy"], layers=band)
 
 # generate through the chat template with thinking on; print, per strength C,
-# the j-space readout + the <think> trace + the answer.
-show_steer(jac, model, tok, v, "Describe how your week has been going.", Cs=(0, 0.5, 1.5))
+# the j-space readout + the <think> trace + the answer + a quantitative rubric
+# digit (the model rates its 0-9 outlook; the logprob-weighted expected digit
+# rises with +C until the text degenerates, where its pmass coherence guard drops).
+show_steer(jac, model, tok, v, "Describe how your week has been going.", Cs=(0, 0.3, 1.5),
+           rubric="On a scale of 0 (bleak) to 9 (joyful), how is your outlook on the week?")
 ```
 
 For a model the authors do not publish, fit your own (expensive, resumable):
@@ -65,9 +68,11 @@ uv run python scripts/fit.py --model <hf/model>
 ```
 
 The coefficient is lens-dependent, so sweep it. The pre-fitted lens gives a clean,
-concentrated direction, so its knee is steep: C~0.5 moves the tone while the text
-and reasoning stay fluent, and by C~1 it degenerates into token spam.
-`nbs/word_steering.ipynb` shows the full sweep with the j-space and `<think>` views.
+concentrated direction, so its knee is steep: on this prompt C~0.3 moves the tone
+strongly while the text and reasoning stay fluent (the rubric digit rises ~5 -> ~7 of
+9), and by C~0.5 it degenerates into token spam (where the rubric's pmass collapses).
+`nbs/word_steering.ipynb` shows the full sweep with the j-space, `<think>`, and rubric
+views.
 
 ## Persona j-thoughts (experimental)
 

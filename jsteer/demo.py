@@ -41,8 +41,8 @@ _ANS_FMT = (' Think it over, then answer with JSON {"ans": N} where N is a singl
 
 
 @torch.no_grad()
-def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int
-                 ) -> tuple[float, float]:
+def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
+                 do_sample: bool = False, temperature: float = 0.7) -> tuple[float, float]:
     """Ask `rubric`, let the model think, then FORCE the answer slot `{"ans": ` and
     read the logprob-weighted expected digit 0-9 there. Returns (expected, pmass).
 
@@ -55,8 +55,14 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int
     prompt = chat_input(tok, rubric + _ANS_FMT)
     enc = tok(prompt, return_tensors="pt").to(model.device)
     torch.manual_seed(seed)
-    out = model.generate(**enc, max_new_tokens=max_new_tokens,
-                         pad_token_id=tok.eos_token_id)
+    # this model ships no generation_config, so generate() is greedy by default: seeds
+    # only matter (distinct think traces) when do_sample=True -- which is what makes the
+    # coherence_sweep's multi-seed BMA average over anything.
+    gen_kw = dict(max_new_tokens=max_new_tokens, pad_token_id=tok.eos_token_id,
+                  do_sample=do_sample)
+    if do_sample:
+        gen_kw["temperature"] = temperature
+    out = model.generate(**enc, **gen_kw)
     think = tok.decode(out[0][enc.input_ids.shape[1]:],
                        skip_special_tokens=False).split("</think>")[0]
     forced = prompt + think + '</think>\n{"ans": '            # our own deterministic slot
@@ -67,6 +73,110 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int
     expected = float((logits[ids].softmax(0) * torch.arange(10., device=ids.device)).sum())
     pmass = float(logits.softmax(0)[ids].sum())
     return expected, pmass
+
+
+@torch.no_grad()
+def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
+                    pmass_floor: float = 0.9, max_steps: int = 15, n_samples: int = 3,
+                    temperature: float = 0.7, max_new_tokens: int = 512) -> list[dict]:
+    """Walk C outward from 0 in +/- directions, scoring the rubric each step, and STOP
+    a direction the step AFTER the answer slot goes incoherent (pmass<pmass_floor). Maps
+    the coherent dose-response of the steered axis without hand-picking Cs. Returns rows
+    sorted by C: {"C","ans","ans_std","pmass","coherent"}. Each C is averaged over
+    `n_samples` think traces (seeds 0..n-1) to tame single-sample answer noise -- a
+    lightweight stand-in for guided.py's Bayesian model averaging; ans_std is the spread.
+    Coherence here is the ANSWER slot's pmass (is the forced digit well-defined), NOT
+    free-form fluency -- the short forced answer survives steering that already frays long
+    generation, so the coherent C-window is wider than the fluent-text window (read the
+    qualitative show_steer for the latter)."""
+    def score(C):
+        with vec(model, C=C):
+            pairs = [rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens, seed=s,
+                                  do_sample=n_samples > 1, temperature=temperature)
+                     for s in range(n_samples)]
+        anss = torch.tensor([a for a, _ in pairs])
+        pmass = float(torch.tensor([p for _, p in pairs]).mean())
+        return {"C": round(float(C), 3), "ans": float(anss.mean()),
+                "ans_std": float(anss.std(unbiased=False)), "pmass": pmass,
+                "coherent": pmass >= pmass_floor}
+    rows = [score(0.0)]
+    for d in (step, -step):                      # outward each way; keep the 1st incoherent point
+        C = d
+        for _ in range(max_steps):
+            r = score(C)
+            rows.append(r)
+            if not r["coherent"]:
+                break
+            C += d
+    rows.sort(key=lambda r: r["C"])
+    return rows
+
+
+def plot_sweep(rows: list[dict], *, title: str = "rubric ans vs C",
+               pmass_floor: float = 0.9):
+    """ans vs C, points colored by answer coherence (pmass); incoherent points
+    (pmass<floor) get a red edge so the coherent dose-response reads at a glance.
+    The colorbar spans [floor-0.15, 1] (not 0-1): pmass barely varies while the
+    answer stays coherent, so anchoring the ramp to the floor is what makes the
+    slot fraying toward the cutoff visible instead of a flat wash of one color."""
+    import matplotlib.pyplot as plt
+    Cs = [r["C"] for r in rows]
+    ans = [r["ans"] for r in rows]
+    pm = [r["pmass"] for r in rows]
+    fig, ax = plt.subplots(figsize=(5, 3))
+    ax.plot(Cs, ans, "-", color="0.8", lw=1, zorder=1)
+    if all("ans_std" in r for r in rows):
+        ax.errorbar(Cs, ans, yerr=[r["ans_std"] for r in rows], fmt="none",
+                    ecolor="0.6", capsize=2, lw=1, zorder=1)
+    sc = ax.scatter(Cs, ans, c=pm, cmap="viridis", vmin=pmass_floor - 0.15, vmax=1.0,
+                    zorder=2, edgecolor=["0.2" if r["coherent"] else "red" for r in rows],
+                    linewidth=1.2)
+    ax.axvline(0, color="0.85", lw=0.8, zorder=0)
+    ax.set_xlabel("steering coefficient C")
+    ax.set_ylabel("rubric ans (0-9)")
+    ax.set_ylim(-0.3, 9.3)
+    ax.set_title(title)
+    cbar = fig.colorbar(sc, ax=ax, label="answer coherence (pmass)")
+    cbar.ax.axhline(pmass_floor, color="red", lw=1)   # the incoherent cutoff
+    fig.tight_layout()
+    return fig
+
+
+def lens_slice_ranks(slice_data):
+    """From a jlens `compute_slice` SliceData: (labels, layers, ranks) where
+    ranks[layer_idx, token_idx] is that tracked token's full-vocab rank at the last
+    slice position (0 = the model's next token). The final layer is the model's own
+    output (J=I), so its column is the ground-truth ranking the lens approximates."""
+    labels = [slice_data.vocab_fragment[t] for t in slice_data.tracked_token_ids]
+    return labels, slice_data.layers, slice_data.rank_tensor[-1]  # [n_layers, n_tracked]
+
+
+def plot_lens_slice(slice_data, *, title: str = "lens rank vs depth"):
+    """Rank of each AUTO-tracked token across every fitted layer, from jlens's
+    `compute_slice` (the reference's frequency-weighted token selection + full-vocab
+    ranks -- we render its output, not a reimplementation). Log y, inverted so the
+    top of the plot is rank 0 (the model's next token): a token that resolves late
+    (e.g. the answer) dives toward the top near the final layers; a generic token
+    peaks mid-depth then falls away. The rightmost x is the final layer (J=I = the
+    model), where the lines meet the model's true ranks."""
+    import matplotlib.pyplot as plt
+    # Noto CJK first (it also has Latin glyphs) so multilingual tokens like 巴黎 render
+    # in the legend instead of tofu -- matplotlib picks ONE font from this list, not a
+    # per-glyph fallback chain, so DejaVu-first would still tofu the CJK. (Claude)
+    plt.rcParams["font.sans-serif"] = ["Noto Sans CJK JP", "DejaVu Sans", "sans-serif"]
+    labels, layers, ranks = lens_slice_ranks(slice_data)
+    fig, ax = plt.subplots(figsize=(6, 3.2))
+    for j, lab in enumerate(labels):
+        ax.plot(layers, ranks[:, j] + 1, marker="o", ms=3, label=repr(lab))
+    ax.set_yscale("log")
+    ax.invert_yaxis()                                    # rank 0 (top token) at the top
+    ax.axvline(layers[-1], color="0.85", lw=0.8, zorder=0)   # final layer = model (J=I)
+    ax.set_xlabel("layer  (rightmost = final layer, J=I = the model)")
+    ax.set_ylabel("rank+1  (log; 1 = the model's next token)")
+    ax.set_title(title)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    return fig
 
 
 @torch.no_grad()
