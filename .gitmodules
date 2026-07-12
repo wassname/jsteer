@@ -1,0 +1,3 @@
+[submodule "docs/vendor/AntiPaSTO_concepts"]
+	path = docs/vendor/AntiPaSTO_concepts
+	url = https://github.com/wassname/AntiPaSTO_concepts.git

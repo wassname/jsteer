@@ -7,3 +7,4 @@ artifacts/
 
 # marimo session cache
 nbs/__marimo__/
+docs/
