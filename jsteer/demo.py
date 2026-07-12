@@ -306,8 +306,10 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                                          apply_span=apply_span), vec.shared, vec.stacked)
     if Cs is None:                    # auto-search the coherent range (needs a probe)
         probe = rubric if rubric is not None else user_msg
+        # search at the SAME generation length as the demo -- coherence (repetition) is
+        # length-sensitive, so a shorter search probe overshoots the real edge.
         Cs = steer_anchors(model, tok, vec, probe, readout=readout, budget=budget,
-                           max_new_tokens=min(max_new_tokens, 200))
+                           max_new_tokens=max_new_tokens)
         logger.info(f"searched coherent anchors: C = {Cs}")
     prompt = chat_input(tok, user_msg)
     enc = tok(prompt, return_tensors="pt").to(model.device)
