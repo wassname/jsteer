@@ -87,6 +87,22 @@ Runtime is steering-lite: `with v(model, C=8): model.generate(...)`.
   min(rep-margin, ans_mass_valid-margin) with ans_mass base-anchored at 0.9*base;
   auto-selects the first-binding limit per readout (ans_mass for verdicts, rep for
   forced-format DIGIT). Evidence: artifacts/steering_demo_results.json (task 42).
+- RESULT (task 43, dual-gate regenerated): the gate fix works structurally (word's fake
+  swing now nulled: score -0.06, readout_ok=False) but the substantive finding is NEGATIVE:
+  NONE of the 7 methods flip the deliberated YES/NO while keeping the answer alive. Inside
+  the valid budget every method's swing is noise-level (<=0.06, vs random 0.03; baseline
+  P(YES)=0.107) and the promoted tokens are function-word/cross-lingual JUNK, not lie/honest
+  -- the concept direction isn't reaching the output at a safe C. Only word moves P(YES)
+  (0.97) and only by derailing (ans_mass 0.14, rambles off-task). readout_ok=False for 6/7,
+  but for the personas that is a single-seed boundary miss (persona_soft 0.895 vs 0.90 floor)
+  NOT over-steer -- the instrument is single-seed greedy and noisy near the edge. meandiff
+  ties the Jacobian variants => the Jacobian adds nothing for persona-contrast on a verdict.
+  Oracle (deepseek-v4-pro) review + triage: docs/reviews/oracle_steering.md. NEXT (priority):
+  (1) surface per-method ||J^T w|| pre-norm magnitude (already logged at DEBUG, jacobian.py
+  :240; predicted word>>personas~0 -- unit-norm amplifies dead persona pullbacks to noise);
+  (2) no-think zero-shot P(YES) sweep to separate "CoT buffers the offset" from "direction is
+  off-target"; (3) multi-seed the edge (readout_ok flickers on single-seed noise). Deliverable:
+  nbs/steering_demo.py (dual-gate table + Claude qualitative read + per-method generations).
 
 ## Style
 
