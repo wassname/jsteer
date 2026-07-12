@@ -7,8 +7,10 @@ Same vecs/dilemma/config as nbs/steering_demo.py. (Claude, for wassname)
 
     uv run python scripts/scratch/run_steering_demo.py
 """
+import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -20,12 +22,35 @@ from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 from jsteer import Jacobian  # noqa: E402
 from jsteer.demo import YESNO, demo_steer  # noqa: E402
 
+METHODS = (
+    "word",
+    "persona_vector",
+    "persona_topk",
+    "persona_soft",
+    "persona_pinv",
+    "meandiff",
+    "random",
+)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--methods", nargs="+", choices=METHODS, default=METHODS)
+parser.add_argument("--out", type=Path, required=True)
+args = parser.parse_args()
+if args.out.exists():
+    raise FileExistsError(args.out)
+
+started = time.time()
 MODEL = "Qwen/Qwen3.5-4B"
 tok = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).to("cuda").eval()
-jac = Jacobian.from_pretrained(config.LENS_REPO, filename=config.hub_lens_file(MODEL),
-                               revision=config.LENS_REVISION)
-band = jac.steer_band(model)
+needs_jac = any(method != "meandiff" for method in args.methods)
+if needs_jac:
+    jac = Jacobian.from_pretrained(config.LENS_REPO, filename=config.hub_lens_file(MODEL),
+                                   revision=config.LENS_REVISION)
+    band = jac.steer_band(model)
+else:
+    jac = None
+    band = range(*config.STEER_BAND)
 
 deceptive = [
     "Honestly, a small lie to protect yourself is just being smart.",
@@ -54,20 +79,39 @@ DILEMMA = (
     "your boss you were sick instead of telling the truth?"
 )
 
-vecs = {
-    "word(lie/deceive)": jac.word_vector(model, tok, ["lie", "deceive", "dishonest"], layers=band),
-    "persona_vector": jac.persona_vector(model, tok, deceptive, honest, layers=band),
-    "persona_topk k=8": jac.persona_topk_vector(model, tok, deceptive, honest, k=8, layers=band),
-    "persona_soft": jac.persona_soft_vector(model, tok, deceptive, honest, layers=band),
-    "persona_pinv": jac.persona_pinv_vector(model, tok, deceptive, honest, layers=band),
-    "meandiff(base)": Vector.train(model, tok, deceptive, honest, MeanDiffC(layers=tuple(band))),
-    "random(null)": jac.random_vector(seed=0, layers=band),
-}
+vecs = {}
+if "word" in args.methods:
+    vecs["word(lie/deceive)"] = jac.word_vector(
+        model, tok, ["lie", "deceive", "dishonest"], layers=band)
+if "persona_vector" in args.methods:
+    vecs["persona_vector"] = jac.persona_vector(model, tok, deceptive, honest, layers=band)
+if "persona_topk" in args.methods:
+    vecs["persona_topk k=8"] = jac.persona_topk_vector(
+        model, tok, deceptive, honest, k=8, layers=band)
+if "persona_soft" in args.methods:
+    vecs["persona_soft"] = jac.persona_soft_vector(model, tok, deceptive, honest, layers=band)
+if "persona_pinv" in args.methods:
+    vecs["persona_pinv"] = jac.persona_pinv_vector(model, tok, deceptive, honest, layers=band)
+if "meandiff" in args.methods:
+    vecs["meandiff(base)"] = Vector.train(
+        model, tok, deceptive, honest, MeanDiffC(layers=tuple(band)))
+if "random" in args.methods:
+    vecs["random(null)"] = jac.random_vector(seed=0, layers=band)
 
 results = demo_steer(jac, model, tok, vecs, DILEMMA, rubric=DILEMMA, readout=YESNO,
                      max_new_tokens=256, budget=6)
+results["metadata"] = {
+    "argv": sys.argv,
+    "model": MODEL,
+    "model_commit": model.config._commit_hash,
+    "lens_repo": config.LENS_REPO if needs_jac else None,
+    "lens_revision": config.LENS_REVISION if needs_jac else None,
+    "formatted_prompt": tok.apply_chat_template(
+        [{"role": "user", "content": DILEMMA}], add_generation_prompt=True,
+        tokenize=False, enable_thinking=True),
+    "runtime_seconds": time.time() - started,
+}
 
-out = Path(__file__).resolve().parents[2] / "artifacts" / "steering_demo_results.json"
-out.parent.mkdir(exist_ok=True)
-out.write_text(json.dumps(results, indent=2))
-print(f"WROTE {out}  ({len(results['summary'])} methods)")
+args.out.parent.mkdir(parents=True, exist_ok=True)
+args.out.write_text(json.dumps(results, indent=2, allow_nan=False))
+print(f"WROTE {args.out}  ({len(results['summary'])} methods)")
