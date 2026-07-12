@@ -40,6 +40,22 @@ Runtime is steering-lite: `with v(model, C=8): model.generate(...)`.
 - One-off validation scripts live in `scripts/scratch/` (u4_step1/2, parity_u1).
 - TODO eval notebook: steer -authority, tinymfv fast (N=16, tokens=16, mfq-2)
   vs unsteered baseline.
+- OPEN: steering-demo calibration is not method-comparable yet. To compare
+  methods you want the same OFF-TARGET budget, then read the on-target effect.
+  The current search finds each method's own "max coherent" edge, which does
+  NOT equalize off-target across methods. Problems: (a) `rep` (distinct-3) is a
+  breakdown *detector*, ~0 through the coherent range then it jumps -- a step
+  function, not a graded dial to calibrate on; (b) `ans_mass` is answer-
+  commitment (confidence, same family as the rejected `pmass`), NOT coherence --
+  it should be a per-row "is the readout valid" flag, not part of the
+  calibration. Plan: one graded degeneracy measure D(C) (candidates: gzip ratio,
+  mean distinct-1..4, seq-rep-n -- NOT perplexity, loops are low-perplexity),
+  search per method for D(C)=tau (common budget), compare on-target there.
+  First cheap step: measure gzip-ratio + distinct-1..4 on the saved
+  `artifacts/steering_demo_results.json` generations to see which is actually
+  graded/monotone in C before switching. Caveat: the "rep non-monotone in C"
+  anomaly (word -0.35 rep=1.0 vs -0.70 rep=0.34) is UNCHECKED -- read the traces
+  qualitatively before trusting it; likely a short-trace/seed artifact, not real.
 
 ## Style
 
