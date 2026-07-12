@@ -11,21 +11,31 @@ output is debuggable and nothing is parsed or reconstructed.
 from __future__ import annotations
 
 import dataclasses
-import math
 
 import torch
 from jlens.vis import _meaningful_token_mask
 from loguru import logger
 from steering_lite import Vector
+from steering_lite.eval.edge import (
+    ANSWER_MASS_FRACTION,
+    DIGIT,
+    REP_LIMIT,
+    YESNO,
+    chat_prompt,
+    five_coefficients,
+    measure_readout,
+    repetition_fraction,
+    search_edge,
+    summarize_anchors,
+)
 from tabulate import tabulate
 
 from .jacobian import Jacobian
 
 
 def chat_input(tok, user_msg: str, *, enable_thinking: bool = True) -> str:
-    return tok.apply_chat_template(
-        [{"role": "user", "content": user_msg}],
-        add_generation_prompt=True, tokenize=False, enable_thinking=enable_thinking)
+    assert enable_thinking is True
+    return chat_prompt(tok, user_msg)
 
 
 def _cthulhu_say(text: str) -> str:
@@ -46,7 +56,7 @@ def _cthulhu_say(text: str) -> str:
 # it catches long-generation degeneration that a short forced JSON object survives).
 # Threshold from the empirical gap in scripts/scratch/rep_metric_check.py over 40+ real
 # generations: coherent reasoning scores rep3 < ~0.3, degenerate loops > ~0.6.
-REP_COHERENT_MAX = 0.35
+REP_COHERENT_MAX = REP_LIMIT
 
 
 # The calibrated edge is where EITHER off-target budget is first spent -- a dual gate,
@@ -59,41 +69,18 @@ REP_COHERENT_MAX = 0.35
 # read off dead answers). So ans_mass binds first for verdicts, rep first for a forced-format
 # DIGIT -- the min auto-selects the right limiter per readout. ans_mass is base-anchored: the
 # readout is valid iff ans_mass >= ANS_MASS_FRAC of the C=0 baseline (per prompt/model).
-ANS_MASS_FRAC = 0.9
-_MIN_TRACE_WORDS = 8
+ANS_MASS_FRAC = ANSWER_MASS_FRACTION
 
 
 def _rep_frac(text: str, n: int = 3) -> float:
-    """1 - distinct-n over whitespace tokens: ~0 = all n-grams unique (fluent), ->1 as
-    the text collapses into a repeated loop. A trace too short to reason (< _MIN_TRACE_WORDS,
-    e.g. a 1-word stub under hard steering) counts as fully degenerate (1.0), not fluent."""
-    toks = text.split()
-    if len(toks) < _MIN_TRACE_WORDS:
-        return 1.0
-    ngrams = list(zip(*[toks[i:] for i in range(n)]))
-    return 1.0 - len(set(ngrams)) / len(ngrams)
-
-
-def _sig(x, n: int = 3):
-    """Round a float to n significant figures for a readable table (non-floats untouched)."""
-    if not isinstance(x, float) or x == 0 or not math.isfinite(x):
-        return x
-    return round(x, -int(math.floor(math.log10(abs(x)))) + (n - 1))
+    assert n == 3
+    return repetition_fraction(text)
 
 
 # a readout = (format suffix appended to the question, forced slot after </think>, the
 # answer tokens to read logprobs over, and the scalar value each maps to). DIGIT is the
 # 0-9 rubric; YESNO reads P(YES) for a binary dilemma (a real decision, not a self-rating
 # the model refuses to give). expected = sum_i value_i * softmax(logit over answer tokens).
-DIGIT = dict(fmt=' Think it over, then answer with JSON {"ans": N} where N is a single'
-                 ' digit from 0 (least) to 9 (most).',
-             prefix='</think>\n{"ans": ',
-             tokens=[str(d) for d in range(10)], values=list(range(10)))
-YESNO = dict(fmt=' Think it over, then give your final answer as one word, YES or NO.',
-             prefix='</think>\nFinal answer: ',
-             tokens=[' NO', ' YES'], values=[0.0, 1.0])   # expected = P(YES)
-
-
 @torch.no_grad()
 def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
                  do_sample: bool = False, temperature: float = 0.7,
@@ -110,28 +97,14 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
     COMMIT to an answer? Under hard steering the forced slot's top token is often not an
     answer token ('imers', '信任', '('), so expected is meaningless; low ans_mass flags it.
     Coherence needs BOTH rep low and ans_mass high (see coherence_sweep)."""
-    prompt = chat_input(tok, rubric + readout["fmt"])
-    enc = tok(prompt, return_tensors="pt").to(model.device)
-    torch.manual_seed(seed)
-    # this model ships no generation_config, so generate() is greedy by default: seeds
-    # only matter (distinct think traces) when do_sample=True -- which is what makes the
-    # coherence_sweep's multi-seed BMA average over anything.
-    gen_kw = dict(max_new_tokens=max_new_tokens, pad_token_id=tok.eos_token_id,
-                  do_sample=do_sample)
-    if do_sample:
-        gen_kw["temperature"] = temperature
-    out = model.generate(**enc, **gen_kw)
-    think = tok.decode(out[0][enc.input_ids.shape[1]:],
-                       skip_special_tokens=False).split("</think>")[0]
-    forced = prompt + think + readout["prefix"]              # our own deterministic slot
-    fenc = tok(forced, return_tensors="pt").to(model.device)
-    logits = model(**fenc).logits[0, -1].float()
-    ids = torch.tensor([tok(t, add_special_tokens=False).input_ids[0]
-                        for t in readout["tokens"]], device=logits.device)
-    vals = torch.tensor(readout["values"], device=logits.device, dtype=torch.float)
-    expected = float((logits[ids].softmax(0) * vals).sum())
-    ans_mass = float(logits.softmax(0)[ids].sum())      # did it commit to an answer token?
-    return expected, _rep_frac(think), ans_mass
+    measurement = measure_readout(
+        model, tok, rubric, max_new_tokens=max_new_tokens, readout=readout,
+        seed=seed, do_sample=do_sample, temperature=temperature)
+    return (
+        measurement["answer"],
+        measurement["repetition"],
+        measurement["answer_mass"],
+    )
 
 
 @torch.no_grad()
@@ -148,37 +121,12 @@ def coherent_edge(model, tok, vec, probe: str, *, readout: dict = DIGIT, sign: i
     baseline); the edge is where either crosses 0 (whichever budget binds first). base_am is
     measured once at C=0. ~`budget` generations instead of a coarse fixed-step sweep. Returns
     the largest usable C (0.0 if the first step breaks)."""
-    def measure(C):
-        with vec(model, C=C):
-            _, rep, am = rubric_score(model, tok, probe, max_new_tokens=max_new_tokens,
-                                      seed=seed, readout=readout)
-        return rep, am
-    base_rep, base_am = measure(0.0)                 # C=0 anchor for both budgets
-    def margin(C):
-        rep, am = measure(C)
-        return min(REP_COHERENT_MAX - rep, am - ANS_MASS_FRAC * base_am)
-    a, fa = 0.0, min(REP_COHERENT_MAX - base_rep, base_am - ANS_MASS_FRAC * base_am)
-    if fa <= 0:                       # baseline itself broken -- nothing to steer
-        return 0.0
-    b = sign * 0.5
-    fb = margin(b)
-    evals = 2
-    while fb > 0 and abs(b) < max_C and evals < budget - 2:   # step out to bracket the edge
-        a, fa = b, fb
-        b = sign * min(abs(b) * 2, max_C)
-        fb = margin(b)
-        evals += 1
-    if fb > 0:                        # coherent all the way to max_C
-        return b
-    for _ in range(budget - evals):   # Illinois refine within [a (coherent), b (incoherent)]
-        c = (a * fb - b * fa) / (fb - fa)
-        fc = margin(c)
-        if fc > 0:
-            a, fa = c, fc
-        else:
-            b, fb = c, fc
-            fa *= 0.5                 # Illinois: shrink the stale coherent-side weight
-    return a
+    assert seed == 0
+    result = search_edge(
+        model, tok, vec, probe, readout=readout, sign=sign,
+        max_new_tokens=max_new_tokens, budget=budget,
+        max_coefficient=max_C)
+    return result["coefficient"]
 
 
 def steer_anchors(model, tok, vec, probe: str, *, readout: dict = DIGIT, budget: int = 6,
@@ -189,10 +137,9 @@ def steer_anchors(model, tok, vec, probe: str, *, readout: dict = DIGIT, budget:
     instead of hand-picking Cs, so it always shows the strongest COHERENT effect."""
     cp = coherent_edge(model, tok, vec, probe, readout=readout, sign=1, budget=budget, **kw)
     cn = coherent_edge(model, tok, vec, probe, readout=readout, sign=-1, budget=budget, **kw)
-    cs = [cn, 0.0, cp]
     if half:
-        cs = [cn, cn / 2, 0.0, cp / 2, cp]
-    return [round(c, 3) for c in cs]
+        return five_coefficients(cn, cp)
+    return [cn, 0.0, cp]
 
 
 @torch.no_grad()
@@ -421,26 +368,17 @@ def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
         q = [a for a in anchors if "ans" in a]
         if not q:
             continue
-        cn, cz, cp = min(q, key=lambda a: a["C"]), min(q, key=lambda a: abs(a["C"])), max(q, key=lambda a: a["C"])
-        # swing = on-target effect across the dual-gated edges (+C = toward the concept).
-        # score = swing weighted by readout validity: (ans_mass at the weaker edge / base)^2.
-        # Because the edge gate holds ans_mass >= ANS_MASS_FRAC*base, edge_am/base ~>= 0.9 here,
-        # so score ~= swing -- the swings are read off LIVE answers, not dead ones (the task-42
-        # over-steer artifact is gone). at_budget = the search reached a real off-target edge
-        # (rep near its cap OR ans_mass near its floor); if NEITHER, it capped early
-        # (budget/max_C) and swing understates the method -- flagged, not silently compared.
-        base_am, edge_am = cz["ans_mass"], min(cn["ans_mass"], cp["ans_mass"])
-        valid_w = (edge_am / base_am) ** 2 if base_am > 0 else 0.0
-        max_rep = max(a["rep"] for a in q)
-        edge_am_frac = edge_am / base_am if base_am > 0 else 0.0
-        at_budget = max_rep >= 0.85 * REP_COHERENT_MAX or edge_am_frac <= 1.05 * ANS_MASS_FRAC
-        summary.append({"method": name, "C*-": _sig(cn["C"]), "C*+": _sig(cp["C"]),
-                        "swing": _sig(cp["ans"] - cn["ans"]),
-                        "score": _sig((cp["ans"] - cn["ans"]) * valid_w),
-                        "ans@-": _sig(cn["ans"]), "ans@0": _sig(cz["ans"]), "ans@+": _sig(cp["ans"]),
-                        "max_rep": _sig(max_rep), "am_edge/base": _sig(edge_am_frac),
-                        "at_budget": at_budget,
-                        "readout_ok": all(a.get("readout_valid", True) for a in q)})
+        canonical = [
+            {
+                "coefficient": anchor["C"],
+                "answer": anchor["ans"],
+                "repetition": anchor["rep"],
+                "answer_mass": anchor["ans_mass"],
+                "display_generation": anchor["gen"],
+            }
+            for anchor in q
+        ]
+        summary.append(summarize_anchors(name, canonical))
     if summary:
         unit = "P(YES)" if readout is YESNO else "ans(0-9)"
         logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the dual-gated edges (edge = first of "
