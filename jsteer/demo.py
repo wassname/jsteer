@@ -415,13 +415,20 @@ def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
             continue
         cn, cz, cp = min(q, key=lambda a: a["C"]), min(q, key=lambda a: abs(a["C"])), max(q, key=lambda a: a["C"])
         # swing = on-target effect across the calibrated edges (+C = toward the concept).
-        # At iso-rep this IS the comparison metric: off-target is held equal by calibration,
-        # so no on-minus-off balancing is needed. max_rep confirms the edges sit at the same
-        # budget (~REP_COHERENT_MAX); readout_ok flags whether the swing is trustworthy.
+        # score = swing weighted by readout validity: (ans_mass at the weaker edge / base)^2.
+        # At iso-rep this IS the comparison metric -- the equal off-target term drops out, so
+        # no on-minus-off balancing is needed. BUT it is only comparable across methods that
+        # actually reached the budget (at_budget: max_rep ~= REP_COHERENT_MAX). A method the
+        # search capped early (max_rep << budget) sits at a LOWER off-target cost, so its
+        # swing/score understates what it could do -- flagged here, not silently compared.
+        base_am, edge_am = cz["ans_mass"], min(cn["ans_mass"], cp["ans_mass"])
+        valid_w = (edge_am / base_am) ** 2 if base_am > 0 else 0.0
+        max_rep = max(a["rep"] for a in q)
         summary.append({"method": name, "C*-": _sig(cn["C"]), "C*+": _sig(cp["C"]),
                         "swing": _sig(cp["ans"] - cn["ans"]),
+                        "score": _sig((cp["ans"] - cn["ans"]) * valid_w),
                         "ans@-": _sig(cn["ans"]), "ans@0": _sig(cz["ans"]), "ans@+": _sig(cp["ans"]),
-                        "max_rep": _sig(max(a["rep"] for a in q)),
+                        "max_rep": _sig(max_rep), "at_budget": max_rep >= 0.85 * REP_COHERENT_MAX,
                         "readout_ok": all(a.get("readout_valid", True) for a in q)})
     if summary:
         unit = "P(YES)" if readout is YESNO else "ans(0-9)"
