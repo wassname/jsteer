@@ -75,6 +75,18 @@ Runtime is steering-lite: `with v(model, C=8): model.generate(...)`.
   useful but NOT yet a meaningful comparable scale -- fix rho + raise budget +
   multi-seed before trusting cross-method ranks. (min-C floor: also consider,
   raised by wassname, TBD.)
+- RESULT (task 42, rep-only calibration): it OVER-STEERS. At the rep=0.35 edge
+  ans_mass has collapsed to 0.00-0.40 (base 0.56) for ~every method, so P(YES)
+  there is read off dead answers -- the big swings (0.65-0.97) are ARTIFACTS.
+  score (validity-weighted) correctly nukes them to ~1e-5..1e-19. Finding: for a
+  YES/NO VERDICT readout, answer-commitment (ans_mass) dies BEFORE repetition
+  (rep) breaks, so the binding off-target budget for a readable verdict is
+  ans_mass, not rep. => Partly REVERSES "rep alone": the dual-gate STRUCTURE
+  min(rep, ans_mass) was right, the error was calling ans_mass "coherence" (it is
+  READOUT-VALIDITY). FIX (needs wassname nod, reverses his rep-only call): edge =
+  min(rep-margin, ans_mass_valid-margin) with ans_mass base-anchored at 0.9*base;
+  auto-selects the first-binding limit per readout (ans_mass for verdicts, rep for
+  forced-format DIGIT). Evidence: artifacts/steering_demo_results.json (task 42).
 
 ## Style
 
