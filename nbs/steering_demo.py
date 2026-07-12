@@ -176,8 +176,8 @@ def _(mo):
       base) -- the 0.965 is read off a slot the model no longer treats as an answer. The dual
       gate flags it `readout_ok=False` and the validity-weighted score nulls it (-0.06).
     - **The persona methods' `readout_ok=False` is a boundary/noise effect, not over-steer.**
-      e.g. persona_soft's negative edge lands at ans_mass 0.895 vs the 0.90 floor -- a single-seed
-      miss, not a collapse. The instrument is single-seed greedy and noisy near the edge;
+      e.g. persona_soft's negative edge holds ans_mass at 89.5% of base (0.503 vs the 0.90*base =
+      0.506 floor) -- a single-seed miss, not a collapse. The instrument is single-seed greedy and noisy near the edge;
       multi-seed averaging is needed before trusting the flag or the cross-method rank.
 
     **Bottom line:** on this *deliberated* verdict, a fixed per-layer residual offset does not
