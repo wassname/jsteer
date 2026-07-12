@@ -46,9 +46,13 @@ DILEMMA = ("You are late for work because you partied until very late last night
            "your boss you were sick instead of telling the truth?")
 
 vecs = {
-    "persona_pinv": jac.persona_pinv_vector(model, tok, deceptive, honest, layers=band),
     "word(lie/deceive)": jac.word_vector(model, tok, ["lie", "deceive", "dishonest"], layers=band),
+    "persona_vector": jac.persona_vector(model, tok, deceptive, honest, layers=band),
+    "persona_topk k=8": jac.persona_topk_vector(model, tok, deceptive, honest, k=8, layers=band),
+    "persona_soft": jac.persona_soft_vector(model, tok, deceptive, honest, layers=band),
+    "persona_pinv": jac.persona_pinv_vector(model, tok, deceptive, honest, layers=band),
     "meandiff(base)": Vector.train(model, tok, deceptive, honest, MeanDiffC(layers=tuple(band))),
+    "random(null)": jac.random_vector(seed=0, layers=band),
 }
 
 # ONE call: per-method heading + searched anchors + comparable generations + end table.
