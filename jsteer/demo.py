@@ -49,15 +49,16 @@ def _cthulhu_say(text: str) -> str:
 REP_COHERENT_MAX = 0.35
 
 
-# COHERENCE (the off-target budget we calibrate on) is repetition ALONE: a point is
-# coherent iff the trace is fluent (rep < REP_COHERENT_MAX) and long enough. ans_mass is
-# NOT coherence, it is answer-commitment (same family as the rejected pmass) and answers a
-# separate READOUT-VALIDITY question: under hard steering the forced slot's top token is
-# sometimes not an answer token at all (observed 'imers', '信任', '('), so P(YES) is
-# meaningless there. We keep ans_mass only as a per-row flag: the readout is valid iff it
-# stays >= ANS_MASS_FRAC of the C=0 baseline ans_mass (base-anchored, per prompt/model). It
-# never gates the coherent-edge search (rep only) -- else ans_mass pre-empts rep and the
-# methods stop at incomparable points (checked: 11/14 edges stopped on ans_mass, rep ~0).
+# The calibrated edge is where EITHER off-target budget is first spent -- a dual gate,
+# min(rep-margin, ans_mass-margin). Two distinct failure modes, whichever binds first:
+#   rep       = the think trace degenerates into a repeat loop (fluency breakdown).
+#   ans_mass  = the forced slot stops committing to an answer token (observed 'imers',
+#               '信任', '(') so the P(YES) readout goes meaningless (readout-validity).
+# For a YES/NO VERDICT the answer dies BEFORE repetition breaks (task 42: rep-only
+# over-steers, ans_mass collapses to 0.0-0.4 at the rep edge, base 0.56, so the swings are
+# read off dead answers). So ans_mass binds first for verdicts, rep first for a forced-format
+# DIGIT -- the min auto-selects the right limiter per readout. ans_mass is base-anchored: the
+# readout is valid iff ans_mass >= ANS_MASS_FRAC of the C=0 baseline (per prompt/model).
 ANS_MASS_FRAC = 0.9
 _MIN_TRACE_WORDS = 8
 
@@ -137,23 +138,27 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
 def coherent_edge(model, tok, vec, probe: str, *, readout: dict = DIGIT, sign: int = 1,
                   max_C: float = 1e5, budget: int = 6, seed: int = 0,
                   max_new_tokens: int = 200) -> float:
-    # max_C is a runaway safety bound only -- the edge should be set by rep breakdown, never
-    # by this cap. If a method never breaks below max_C the real limiter is `budget` (too few
-    # step-outs), which shows up as max_rep << REP_COHERENT_MAX (at_budget=False), not a cap.
-    """Find the strongest coherent |C| in the `sign` direction via the Illinois method
-    (bracket a coherent/incoherent pair, then modified false-position). Coherence is
-    REPETITION ONLY: margin m(C) = REP_COHERENT_MAX - rep > 0 while the trace is fluent; the
-    edge is where it crosses 0. ans_mass does NOT gate here (it is a readout-validity flag,
-    see ANS_MASS_FRAC) so every method is calibrated to the SAME off-target budget
-    (rep ~= REP_COHERENT_MAX), making them comparable. ~`budget` generations instead of a
-    coarse fixed-step sweep. Returns the largest coherent C (0.0 if the first step breaks)."""
-    def margin(C):
+    # max_C is a runaway safety bound only -- the edge should be set by an off-target budget,
+    # never by this cap. If a method never breaks below max_C the real limiter is `budget`
+    # (too few step-outs), which shows up as max_rep << REP_COHERENT_MAX (at_budget=False).
+    """Find the strongest usable |C| in the `sign` direction via the Illinois method
+    (bracket a good/broken pair, then modified false-position). The edge is a DUAL gate:
+    margin m(C) = min(REP_COHERENT_MAX - rep, ans_mass - ANS_MASS_FRAC*base_am) > 0 while the
+    trace is BOTH fluent (rep low) AND still committing to an answer (ans_mass held vs the C=0
+    baseline); the edge is where either crosses 0 (whichever budget binds first). base_am is
+    measured once at C=0. ~`budget` generations instead of a coarse fixed-step sweep. Returns
+    the largest usable C (0.0 if the first step breaks)."""
+    def measure(C):
         with vec(model, C=C):
-            _, rep, _ = rubric_score(model, tok, probe, max_new_tokens=max_new_tokens,
-                                     seed=seed, readout=readout)
-        return REP_COHERENT_MAX - rep
-    a, fa = 0.0, margin(0.0)
-    if fa <= 0:                       # baseline itself incoherent -- nothing to steer
+            _, rep, am = rubric_score(model, tok, probe, max_new_tokens=max_new_tokens,
+                                      seed=seed, readout=readout)
+        return rep, am
+    base_rep, base_am = measure(0.0)                 # C=0 anchor for both budgets
+    def margin(C):
+        rep, am = measure(C)
+        return min(REP_COHERENT_MAX - rep, am - ANS_MASS_FRAC * base_am)
+    a, fa = 0.0, min(REP_COHERENT_MAX - base_rep, base_am - ANS_MASS_FRAC * base_am)
+    if fa <= 0:                       # baseline itself broken -- nothing to steer
         return 0.0
     b = sign * 0.5
     fb = margin(b)
@@ -417,27 +422,30 @@ def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
         if not q:
             continue
         cn, cz, cp = min(q, key=lambda a: a["C"]), min(q, key=lambda a: abs(a["C"])), max(q, key=lambda a: a["C"])
-        # swing = on-target effect across the calibrated edges (+C = toward the concept).
+        # swing = on-target effect across the dual-gated edges (+C = toward the concept).
         # score = swing weighted by readout validity: (ans_mass at the weaker edge / base)^2.
-        # At iso-rep this IS the comparison metric -- the equal off-target term drops out, so
-        # no on-minus-off balancing is needed. BUT it is only comparable across methods that
-        # actually reached the budget (at_budget: max_rep ~= REP_COHERENT_MAX). A method the
-        # search capped early (max_rep << budget) sits at a LOWER off-target cost, so its
-        # swing/score understates what it could do -- flagged here, not silently compared.
+        # Because the edge gate holds ans_mass >= ANS_MASS_FRAC*base, edge_am/base ~>= 0.9 here,
+        # so score ~= swing -- the swings are read off LIVE answers, not dead ones (the task-42
+        # over-steer artifact is gone). at_budget = the search reached a real off-target edge
+        # (rep near its cap OR ans_mass near its floor); if NEITHER, it capped early
+        # (budget/max_C) and swing understates the method -- flagged, not silently compared.
         base_am, edge_am = cz["ans_mass"], min(cn["ans_mass"], cp["ans_mass"])
         valid_w = (edge_am / base_am) ** 2 if base_am > 0 else 0.0
         max_rep = max(a["rep"] for a in q)
+        edge_am_frac = edge_am / base_am if base_am > 0 else 0.0
+        at_budget = max_rep >= 0.85 * REP_COHERENT_MAX or edge_am_frac <= 1.05 * ANS_MASS_FRAC
         summary.append({"method": name, "C*-": _sig(cn["C"]), "C*+": _sig(cp["C"]),
                         "swing": _sig(cp["ans"] - cn["ans"]),
                         "score": _sig((cp["ans"] - cn["ans"]) * valid_w),
                         "ans@-": _sig(cn["ans"]), "ans@0": _sig(cz["ans"]), "ans@+": _sig(cp["ans"]),
-                        "max_rep": _sig(max_rep), "at_budget": max_rep >= 0.85 * REP_COHERENT_MAX,
+                        "max_rep": _sig(max_rep), "am_edge/base": _sig(edge_am_frac),
+                        "at_budget": at_budget,
                         "readout_ok": all(a.get("readout_valid", True) for a in q)})
     if summary:
         unit = "P(YES)" if readout is YESNO else "ans(0-9)"
-        logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the iso-rep calibrated edges; "
-                    f"swing = ans@+ - ans@- (on-target effect at equal off-target budget); "
-                    f"max_rep ~= {REP_COHERENT_MAX} confirms equal budget\nprompt={user_msg[:50]!r}"
-                    f"\n{'=' * 72}\n"
+        logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the dual-gated edges (edge = first of "
+                    f"rep>={REP_COHERENT_MAX} or ans_mass<{ANS_MASS_FRAC}*base to bind); "
+                    f"swing = ans@+ - ans@-; score = swing weighted by readout validity"
+                    f"\nprompt={user_msg[:50]!r}\n{'=' * 72}\n"
                     + tabulate(summary, headers="keys", tablefmt="github", floatfmt=".3g"))
     return {"summary": summary, "detail": detail}
