@@ -43,14 +43,9 @@ started = time.time()
 MODEL = "Qwen/Qwen3.5-4B"
 tok = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).to("cuda").eval()
-needs_jac = any(method != "meandiff" for method in args.methods)
-if needs_jac:
-    jac = Jacobian.from_pretrained(config.LENS_REPO, filename=config.hub_lens_file(MODEL),
-                                   revision=config.LENS_REVISION)
-    band = jac.steer_band(model)
-else:
-    jac = None
-    band = range(*config.STEER_BAND)
+jac = Jacobian.from_pretrained(config.LENS_REPO, filename=config.hub_lens_file(MODEL),
+                               revision=config.LENS_REVISION)
+band = jac.steer_band(model)
 
 deceptive = [
     "Honestly, a small lie to protect yourself is just being smart.",
@@ -104,8 +99,8 @@ results["metadata"] = {
     "argv": sys.argv,
     "model": MODEL,
     "model_commit": model.config._commit_hash,
-    "lens_repo": config.LENS_REPO if needs_jac else None,
-    "lens_revision": config.LENS_REVISION if needs_jac else None,
+    "lens_repo": config.LENS_REPO,
+    "lens_revision": config.LENS_REVISION,
     "formatted_prompt": tok.apply_chat_template(
         [{"role": "user", "content": DILEMMA}], add_generation_prompt=True,
         tokenize=False, enable_thinking=True),
