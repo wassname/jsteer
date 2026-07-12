@@ -351,7 +351,7 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
         gen = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=False)
         block = [f"\n--- C={C:+g} " + "-" * 60, "  steer promotes:",
                  _cthulhu_say(promoted_txt), gen]
-        row = {"C": C, "promotes": promoted_txt}
+        row = {"C": C, "promotes": promoted_txt, "gen": gen}
         if ans is not None:
             # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
             # rep>=0.35 (loop) or ans_mass<0.5 (didn't commit to an answer) => distrust it.
@@ -376,19 +376,23 @@ def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
 
     `vecs` maps a display name (state its config there, e.g. 'persona_pinv k=8') to a
     steering-lite Vector. `rubric`+`readout` add the quantitative answer and drive the
-    edge search (DIGIT = 0-9 rating, YESNO = P(YES) on a binary dilemma)."""
-    summary = []
+    edge search (DIGIT = 0-9 rating, YESNO = P(YES) on a binary dilemma).
+
+    Returns {"summary": [one row per method], "detail": {name: [anchor rows incl. 'gen']}}
+    so a UI (e.g. marimo) can render the comparison table AND the per-method generations."""
+    summary, detail = [], {}
     for name, vec in vecs.items():
         logger.info(f"\n\n{'#' * 72}\n#  {name}\n{'#' * 72}")
         anchors = show_steer(jac, model, tok, vec, user_msg, Cs=None, rubric=rubric,
                              readout=readout, budget=budget, max_new_tokens=max_new_tokens,
                              seed=seed)
+        detail[name] = anchors
         q = [a for a in anchors if "ans" in a]
         if not q:
             continue
         cn, cz, cp = min(q, key=lambda a: a["C"]), min(q, key=lambda a: abs(a["C"])), max(q, key=lambda a: a["C"])
-        summary.append({"method": name, "C*-": cn["C"], f"ans@-": cn["ans"],
-                        "ans@0": cz["ans"], f"ans@+": cp["ans"], "C*+": cp["C"],
+        summary.append({"method": name, "C*-": cn["C"], "ans@-": cn["ans"],
+                        "ans@0": cz["ans"], "ans@+": cp["ans"], "C*+": cp["C"],
                         "max_rep": max(a["rep"] for a in q),
                         "min_ans_mass": min(a["ans_mass"] for a in q)})
     if summary:
@@ -396,4 +400,4 @@ def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
         logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the strongest coherent steer "
                     f"(-C* / 0 / +C*), prompt={user_msg[:50]!r}\n{'=' * 72}\n"
                     + tabulate(summary, headers="keys", tablefmt="github", floatfmt="+.3f"))
-    return summary
+    return {"summary": summary, "detail": detail}
