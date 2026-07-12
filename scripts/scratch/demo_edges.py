@@ -14,8 +14,8 @@ from loguru import logger  # noqa: E402
 from steering_lite import MeanDiffC, Vector  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-from jsteer import Jacobian, show_steer  # noqa: E402
-from jsteer.demo import YESNO  # noqa: E402
+from jsteer import Jacobian  # noqa: E402
+from jsteer.demo import YESNO, demo_steer  # noqa: E402
 
 MODEL = "Qwen/Qwen3.5-4B"
 tok = AutoTokenizer.from_pretrained(MODEL)
@@ -47,12 +47,10 @@ DILEMMA = ("You are late for work because you partied until very late last night
 
 vecs = {
     "persona_pinv": jac.persona_pinv_vector(model, tok, deceptive, honest, layers=band),
-    "word(lie)": jac.word_vector(model, tok, ["lie", "deceive", "dishonest"], layers=band),
+    "word(lie/deceive)": jac.word_vector(model, tok, ["lie", "deceive", "dishonest"], layers=band),
     "meandiff(base)": Vector.train(model, tok, deceptive, honest, MeanDiffC(layers=tuple(band))),
 }
 
-for name, v in vecs.items():
-    logger.info(f"\n\n##################### {name} #####################")
-    # Cs=None -> show_steer searches the coherent edge each way and demos the anchors.
-    show_steer(jac, model, tok, v, DILEMMA, rubric=DILEMMA, readout=YESNO,
-               max_new_tokens=256, budget=6)
+# ONE call: per-method heading + searched anchors + comparable generations + end table.
+demo_steer(jac, model, tok, vecs, DILEMMA, rubric=DILEMMA, readout=YESNO,
+           max_new_tokens=256, budget=6)

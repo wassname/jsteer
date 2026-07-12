@@ -16,6 +16,7 @@ import torch
 from jlens.vis import _meaningful_token_mask
 from loguru import logger
 from steering_lite import Vector
+from tabulate import tabulate
 
 from .jacobian import Jacobian
 
@@ -281,7 +282,7 @@ def plot_lens_slice(slice_data, *, title: str = "lens rank vs depth"):
 def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                Cs=None, max_new_tokens: int = 512, seed: int = 0,
                apply_mode: str | None = None, apply_span: int = 1,
-               rubric: str | None = None, readout: dict = DIGIT, budget: int = 6) -> None:
+               rubric: str | None = None, readout: dict = DIGIT, budget: int = 6) -> list[dict]:
     """Per C: the steer-promoted tokens in a cowsay bubble, then the raw generation, all
     under steering. When `Cs` is None (the default), SEARCH for the strongest coherent steer
     each way (Illinois edge-find, ~`budget` evals/side, coherence probed on `rubric`) and
@@ -326,6 +327,7 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
                                                  # effect reads as the top of (steered-base)
     # SHOULD: C=0 is the baseline; +C tilts the promoted tokens and tone toward the
     # concept, -C away; all stay coherent (gibberish = coeff too large).
+    anchors = []
     for C in Cs:
         torch.manual_seed(seed)
         with vec(model, C=C):
@@ -349,6 +351,7 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
         gen = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=False)
         block = [f"\n--- C={C:+g} " + "-" * 60, "  steer promotes:",
                  _cthulhu_say(promoted_txt), gen]
+        row = {"C": C, "promotes": promoted_txt}
         if ans is not None:
             # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
             # rep>=0.35 (loop) or ans_mass<0.5 (didn't commit to an answer) => distrust it.
@@ -356,4 +359,41 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
             bad = rep >= REP_COHERENT_MAX or am < ANS_MASS_MIN
             block.append(f"  rubric ans≈{e:.2f}  (rep={rep:.2f} ans_mass={am:.2f}"
                          f"{' DEGENERATE' if bad else ''})")
+            row.update(ans=e, rep=rep, ans_mass=am, coherent=not bad)
+        anchors.append(row)
         logger.info("\n".join(block) + "\n")
+    return anchors
+
+
+@torch.no_grad()
+def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
+               rubric: str | None = None, readout: dict = DIGIT, budget: int = 6,
+               max_new_tokens: int = 256, seed: int = 0) -> list[dict]:
+    """THE steering demo, one call for every notebook. For each named vector: a clear
+    heading, a search for the strongest coherent steer each way, the raw generations at
+    [-C*, -C*/2, 0, +C*/2, +C*] (comparable qualitative outputs, same prompt), then ONE
+    table at the end comparing methods on the quant readout at the coherent edges.
+
+    `vecs` maps a display name (state its config there, e.g. 'persona_pinv k=8') to a
+    steering-lite Vector. `rubric`+`readout` add the quantitative answer and drive the
+    edge search (DIGIT = 0-9 rating, YESNO = P(YES) on a binary dilemma)."""
+    summary = []
+    for name, vec in vecs.items():
+        logger.info(f"\n\n{'#' * 72}\n#  {name}\n{'#' * 72}")
+        anchors = show_steer(jac, model, tok, vec, user_msg, Cs=None, rubric=rubric,
+                             readout=readout, budget=budget, max_new_tokens=max_new_tokens,
+                             seed=seed)
+        q = [a for a in anchors if "ans" in a]
+        if not q:
+            continue
+        cn, cz, cp = min(q, key=lambda a: a["C"]), min(q, key=lambda a: abs(a["C"])), max(q, key=lambda a: a["C"])
+        summary.append({"method": name, "C*-": cn["C"], f"ans@-": cn["ans"],
+                        "ans@0": cz["ans"], f"ans@+": cp["ans"], "C*+": cp["C"],
+                        "max_rep": max(a["rep"] for a in q),
+                        "min_ans_mass": min(a["ans_mass"] for a in q)})
+    if summary:
+        unit = "P(YES)" if readout is YESNO else "ans(0-9)"
+        logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the strongest coherent steer "
+                    f"(-C* / 0 / +C*), prompt={user_msg[:50]!r}\n{'=' * 72}\n"
+                    + tabulate(summary, headers="keys", tablefmt="github", floatfmt="+.3f"))
+    return summary
