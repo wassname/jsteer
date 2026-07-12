@@ -368,7 +368,7 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
 @torch.no_grad()
 def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
                rubric: str | None = None, readout: dict = DIGIT, budget: int = 6,
-               max_new_tokens: int = 256, seed: int = 0) -> list[dict]:
+               max_new_tokens: int = 256, seed: int = 0) -> dict:
     """THE steering demo, one call for every notebook. For each named vector: a clear
     heading, a search for the strongest coherent steer each way, the raw generations at
     [-C*, -C*/2, 0, +C*/2, +C*] (comparable qualitative outputs, same prompt), then ONE
