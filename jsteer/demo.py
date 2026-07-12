@@ -11,6 +11,7 @@ output is debuggable and nothing is parsed or reconstructed.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import torch
 from jlens.vis import _meaningful_token_mask
@@ -48,13 +49,16 @@ def _cthulhu_say(text: str) -> str:
 REP_COHERENT_MAX = 0.35
 
 
-# a point is coherent iff the reasoning trace is fluent (rep < REP_COHERENT_MAX AND long
-# enough) AND the model actually committed to one of the answer tokens (ans_mass high).
-# The second gate matters for open readouts like YESNO: under hard steering the forced
-# slot's top token is often NOT an answer token at all (observed 'imers', '信ażć', '(') --
-# the value read over just the answer logits is then meaningless. (Not needed for DIGIT,
-# whose JSON prefix forces a digit, so ans_mass ~ 1 there.)
-ANS_MASS_MIN = 0.5
+# COHERENCE (the off-target budget we calibrate on) is repetition ALONE: a point is
+# coherent iff the trace is fluent (rep < REP_COHERENT_MAX) and long enough. ans_mass is
+# NOT coherence, it is answer-commitment (same family as the rejected pmass) and answers a
+# separate READOUT-VALIDITY question: under hard steering the forced slot's top token is
+# sometimes not an answer token at all (observed 'imers', '信任', '('), so P(YES) is
+# meaningless there. We keep ans_mass only as a per-row flag: the readout is valid iff it
+# stays >= ANS_MASS_FRAC of the C=0 baseline ans_mass (base-anchored, per prompt/model). It
+# never gates the coherent-edge search (rep only) -- else ans_mass pre-empts rep and the
+# methods stop at incomparable points (checked: 11/14 edges stopped on ans_mass, rep ~0).
+ANS_MASS_FRAC = 0.9
 _MIN_TRACE_WORDS = 8
 
 
@@ -67,6 +71,13 @@ def _rep_frac(text: str, n: int = 3) -> float:
         return 1.0
     ngrams = list(zip(*[toks[i:] for i in range(n)]))
     return 1.0 - len(set(ngrams)) / len(ngrams)
+
+
+def _sig(x, n: int = 3):
+    """Round a float to n significant figures for a readable table (non-floats untouched)."""
+    if not isinstance(x, float) or x == 0 or not math.isfinite(x):
+        return x
+    return round(x, -int(math.floor(math.log10(abs(x)))) + (n - 1))
 
 
 # a readout = (format suffix appended to the question, forced slot after </think>, the
@@ -126,17 +137,18 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
 def coherent_edge(model, tok, vec, probe: str, *, readout: dict = DIGIT, sign: int = 1,
                   max_C: float = 4.0, budget: int = 6, seed: int = 0,
                   max_new_tokens: int = 200) -> float:
-    """Find the STRONGEST coherent |C| in the `sign` direction via the Illinois method
-    (bracket a coherent/incoherent pair, then modified false-position). Coherence margin
-    m(C) = min(REP_COHERENT_MAX - rep, ans_mass - ANS_MASS_MIN) is > 0 while the model
-    reasons fluently AND commits to an answer; the edge is where it crosses 0. ~`budget`
-    generations instead of a coarse fixed-step sweep. Returns the largest coherent C
-    (0.0 if even the first step already breaks)."""
+    """Find the strongest coherent |C| in the `sign` direction via the Illinois method
+    (bracket a coherent/incoherent pair, then modified false-position). Coherence is
+    REPETITION ONLY: margin m(C) = REP_COHERENT_MAX - rep > 0 while the trace is fluent; the
+    edge is where it crosses 0. ans_mass does NOT gate here (it is a readout-validity flag,
+    see ANS_MASS_FRAC) so every method is calibrated to the SAME off-target budget
+    (rep ~= REP_COHERENT_MAX), making them comparable. ~`budget` generations instead of a
+    coarse fixed-step sweep. Returns the largest coherent C (0.0 if the first step breaks)."""
     def margin(C):
         with vec(model, C=C):
-            _, rep, am = rubric_score(model, tok, probe, max_new_tokens=max_new_tokens,
-                                      seed=seed, readout=readout)
-        return min(REP_COHERENT_MAX - rep, am - ANS_MASS_MIN)
+            _, rep, _ = rubric_score(model, tok, probe, max_new_tokens=max_new_tokens,
+                                     seed=seed, readout=readout)
+        return REP_COHERENT_MAX - rep
     a, fa = 0.0, margin(0.0)
     if fa <= 0:                       # baseline itself incoherent -- nothing to steer
         return 0.0
@@ -181,12 +193,12 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
                     temperature: float = 0.7, max_new_tokens: int = 512) -> list[dict]:
     """Walk C outward from 0 in +/- directions, scoring the rubric each step, and STOP a
     direction the step AFTER the point goes INCOHERENT. Coherent = the think trace is fluent
-    (mean rep < REP_COHERENT_MAX) AND the model committed to an answer token (mean ans_mass
-    > ANS_MASS_MIN). Both are needed: under hard steering the trace can stay non-repetitive
-    while the forced answer slot emits a non-answer token, making `ans` meaningless. Maps
-    the coherent dose-response without hand-picking Cs. Returns rows sorted by C:
-    {"C","ans","ans_std","rep","ans_mass","coherent"}. Each C is averaged over `n_samples`
-    think traces (seeds 0..n-1); ans_std is the spread."""
+    (mean rep < REP_COHERENT_MAX) -- repetition only, the off-target budget we calibrate on.
+    ans_mass is reported as a separate readout-validity flag (`readout_valid`: mean ans_mass
+    >= ANS_MASS_FRAC of the C=0 baseline), NOT a coherence gate. Maps the coherent
+    dose-response without hand-picking Cs. Returns rows sorted by C: {"C","ans","ans_std",
+    "rep","ans_mass","coherent","readout_valid"}. Each C is averaged over `n_samples` think
+    traces (seeds 0..n-1); ans_std is the spread."""
     def score(C):
         with vec(model, C=C):
             triples = [rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens, seed=s,
@@ -198,8 +210,9 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
         ans_mass = float(torch.tensor([m for _, _, m in triples]).mean())
         return {"C": round(float(C), 3), "ans": float(anss.mean()),
                 "ans_std": float(anss.std(unbiased=False)), "rep": rep, "ans_mass": ans_mass,
-                "coherent": rep < REP_COHERENT_MAX and ans_mass > ANS_MASS_MIN}
+                "coherent": rep < REP_COHERENT_MAX}
     rows = [score(0.0)]
+    base_am = rows[0]["ans_mass"]                 # C=0 baseline for the readout-validity flag
     for d in (step, -step):                      # outward each way; keep the 1st incoherent point
         C = d
         for _ in range(max_steps):
@@ -208,6 +221,8 @@ def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
             if not r["coherent"]:
                 break
             C += d
+    for r in rows:                                # readout trustworthy iff ans_mass held >= 90% of base
+        r["readout_valid"] = r["ans_mass"] >= ANS_MASS_FRAC * base_am
     rows.sort(key=lambda r: r["C"])
     return rows
 
@@ -354,14 +369,22 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
         row = {"C": C, "promotes": promoted_txt, "gen": gen}
         if ans is not None:
             # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
-            # rep>=0.35 (loop) or ans_mass<0.5 (didn't commit to an answer) => distrust it.
+            # rep>=REP_COHERENT_MAX => repetition breakdown (the off-target budget is spent).
             e, rep, am = ans
-            bad = rep >= REP_COHERENT_MAX or am < ANS_MASS_MIN
+            degenerate = rep >= REP_COHERENT_MAX
             block.append(f"  rubric ans≈{e:.2f}  (rep={rep:.2f} ans_mass={am:.2f}"
-                         f"{' DEGENERATE' if bad else ''})")
-            row.update(ans=e, rep=rep, ans_mass=am, coherent=not bad)
+                         f"{' DEGENERATE' if degenerate else ''})")
+            row.update(ans=e, rep=rep, ans_mass=am, coherent=not degenerate)
         anchors.append(row)
         logger.info("\n".join(block) + "\n")
+    # readout-validity flag, base-anchored: P(YES) is trustworthy only where the model kept
+    # committing to an answer token, i.e. ans_mass >= ANS_MASS_FRAC of the C=0 baseline. This
+    # is separate from coherence (rep) and never gates the edge search.
+    q = [a for a in anchors if "ans_mass" in a]
+    if q:
+        base_am = min(q, key=lambda a: abs(a["C"]))["ans_mass"]
+        for a in q:
+            a["readout_valid"] = a["ans_mass"] >= ANS_MASS_FRAC * base_am
     return anchors
 
 
@@ -391,13 +414,20 @@ def demo_steer(jac: Jacobian, model, tok, vecs: dict, user_msg: str, *,
         if not q:
             continue
         cn, cz, cp = min(q, key=lambda a: a["C"]), min(q, key=lambda a: abs(a["C"])), max(q, key=lambda a: a["C"])
-        summary.append({"method": name, "C*-": cn["C"], "ans@-": cn["ans"],
-                        "ans@0": cz["ans"], "ans@+": cp["ans"], "C*+": cp["C"],
-                        "max_rep": max(a["rep"] for a in q),
-                        "min_ans_mass": min(a["ans_mass"] for a in q)})
+        # swing = on-target effect across the calibrated edges (+C = toward the concept).
+        # At iso-rep this IS the comparison metric: off-target is held equal by calibration,
+        # so no on-minus-off balancing is needed. max_rep confirms the edges sit at the same
+        # budget (~REP_COHERENT_MAX); readout_ok flags whether the swing is trustworthy.
+        summary.append({"method": name, "C*-": _sig(cn["C"]), "C*+": _sig(cp["C"]),
+                        "swing": _sig(cp["ans"] - cn["ans"]),
+                        "ans@-": _sig(cn["ans"]), "ans@0": _sig(cz["ans"]), "ans@+": _sig(cp["ans"]),
+                        "max_rep": _sig(max(a["rep"] for a in q)),
+                        "readout_ok": all(a.get("readout_valid", True) for a in q)})
     if summary:
         unit = "P(YES)" if readout is YESNO else "ans(0-9)"
-        logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the strongest coherent steer "
-                    f"(-C* / 0 / +C*), prompt={user_msg[:50]!r}\n{'=' * 72}\n"
-                    + tabulate(summary, headers="keys", tablefmt="github", floatfmt="+.3f"))
+        logger.info(f"\n\n{'=' * 72}\nCOMPARISON: {unit} at the iso-rep calibrated edges; "
+                    f"swing = ans@+ - ans@- (on-target effect at equal off-target budget); "
+                    f"max_rep ~= {REP_COHERENT_MAX} confirms equal budget\nprompt={user_msg[:50]!r}"
+                    f"\n{'=' * 72}\n"
+                    + tabulate(summary, headers="keys", tablefmt="github", floatfmt=".3g"))
     return {"summary": summary, "detail": detail}
