@@ -124,8 +124,10 @@ def _h_bar_final(model, tok, prompts: list[str], *, batch_size: int = 8,
     lm = from_hf(model, tok)                                     # layout detection only
     target_layer = lm.n_layers - 1
     acc, n = None, 0
+    # single-batch persona lists (<= batch_size) make a useless 1/1 bar that still prints
+    # a completion line; disable those. Both intervals equal for the multi-batch case.
     for i in tqdm(range(0, len(prompts), batch_size), desc=f"h_bar {label}",
-                  mininterval=30, maxinterval=60):
+                  disable=len(prompts) <= batch_size, mininterval=120, maxinterval=120):
         batch = prompts[i:i + batch_size]
         enc = tok(batch, return_tensors="pt", padding=True, truncation=True,
                   max_length=max_length, padding_side="right").to(model.device)
