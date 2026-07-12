@@ -122,6 +122,59 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
 
 
 @torch.no_grad()
+def coherent_edge(model, tok, vec, probe: str, *, readout: dict = DIGIT, sign: int = 1,
+                  max_C: float = 4.0, budget: int = 6, seed: int = 0,
+                  max_new_tokens: int = 200) -> float:
+    """Find the STRONGEST coherent |C| in the `sign` direction via the Illinois method
+    (bracket a coherent/incoherent pair, then modified false-position). Coherence margin
+    m(C) = min(REP_COHERENT_MAX - rep, ans_mass - ANS_MASS_MIN) is > 0 while the model
+    reasons fluently AND commits to an answer; the edge is where it crosses 0. ~`budget`
+    generations instead of a coarse fixed-step sweep. Returns the largest coherent C
+    (0.0 if even the first step already breaks)."""
+    def margin(C):
+        with vec(model, C=C):
+            _, rep, am = rubric_score(model, tok, probe, max_new_tokens=max_new_tokens,
+                                      seed=seed, readout=readout)
+        return min(REP_COHERENT_MAX - rep, am - ANS_MASS_MIN)
+    a, fa = 0.0, margin(0.0)
+    if fa <= 0:                       # baseline itself incoherent -- nothing to steer
+        return 0.0
+    b = sign * 0.5
+    fb = margin(b)
+    evals = 2
+    while fb > 0 and abs(b) < max_C and evals < budget - 2:   # step out to bracket the edge
+        a, fa = b, fb
+        b = sign * min(abs(b) * 2, max_C)
+        fb = margin(b)
+        evals += 1
+    if fb > 0:                        # coherent all the way to max_C
+        return b
+    for _ in range(budget - evals):   # Illinois refine within [a (coherent), b (incoherent)]
+        c = (a * fb - b * fa) / (fb - fa)
+        fc = margin(c)
+        if fc > 0:
+            a, fa = c, fc
+        else:
+            b, fb = c, fc
+            fa *= 0.5                 # Illinois: shrink the stale coherent-side weight
+    return a
+
+
+def steer_anchors(model, tok, vec, probe: str, *, readout: dict = DIGIT, budget: int = 6,
+                  half: bool = True, **kw) -> list[float]:
+    """Search both directions for the strongest coherent steer and return the anchor Cs to
+    demo: [-C*, (-C*/2), 0, (+C*/2), +C*] -- the max coherent steer each way, baseline, and
+    (if half) the half-strength midpoints for the dose-response. Every demo calls this
+    instead of hand-picking Cs, so it always shows the strongest COHERENT effect."""
+    cp = coherent_edge(model, tok, vec, probe, readout=readout, sign=1, budget=budget, **kw)
+    cn = coherent_edge(model, tok, vec, probe, readout=readout, sign=-1, budget=budget, **kw)
+    cs = [cn, 0.0, cp]
+    if half:
+        cs = [cn, cn / 2, 0.0, cp / 2, cp]
+    return [round(c, 3) for c in cs]
+
+
+@torch.no_grad()
 def coherence_sweep(model, tok, vec, rubric: str, *, step: float = 0.1,
                     max_steps: int = 15, n_samples: int = 3, readout: dict = DIGIT,
                     temperature: float = 0.7, max_new_tokens: int = 512) -> list[dict]:
@@ -226,32 +279,36 @@ def plot_lens_slice(slice_data, *, title: str = "lens rank vs depth"):
 
 @torch.no_grad()
 def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
-               Cs=(-6, 0, 6), max_new_tokens: int = 512, seed: int = 0,
+               Cs=None, max_new_tokens: int = 512, seed: int = 0,
                apply_mode: str | None = None, apply_span: int = 1,
-               rubric: str | None = None) -> None:
-    """Per C: the steer-promoted tokens in a cowsay bubble, then the raw generation,
-    all under steering. Uses the model's own generation_config sampling; `seed` fixes
-    it so the C blocks are comparable. max_new_tokens defaults to 512 so Qwen3's <think>
-    block can close; 256 truncates mid-reasoning. The cowsay speaks the top of
-    (steered - unsteered) next-token logits -- what THIS C pushes up, with the shared
-    think-opener prior subtracted out (the old lens_topk-at-last-position surfaced only
-    Okay/Here/The for every C; the calibrated cross-layer lens readout is compute_slice
-    on a completion prompt). `jac` is unused here, kept for call-site stability.
+               rubric: str | None = None, readout: dict = DIGIT, budget: int = 6) -> None:
+    """Per C: the steer-promoted tokens in a cowsay bubble, then the raw generation, all
+    under steering. When `Cs` is None (the default), SEARCH for the strongest coherent steer
+    each way (Illinois edge-find, ~`budget` evals/side, coherence probed on `rubric`) and
+    demo the anchors [-C*, -C*/2, 0, +C*/2, +C*] -- the max coherent steer both ways, plus
+    half-strength and baseline. So every demo shows the strongest COHERENT effect instead of
+    hand-picked Cs that either do nothing or degenerate. Pass an explicit `Cs` to override.
+
+    Uses the model's own generation_config sampling; `seed` fixes it so the C blocks are
+    comparable. The cowsay speaks the top of (steered - unsteered) next-token logits -- what
+    THIS C pushes up, with the shared think-opener prior subtracted out. `jac` is unused,
+    kept for call-site stability.
 
     Extraction is decoupled from DELIVERY (see applies.py): pass `apply_mode`
-    (add | clamp | add_last | replace_last) to swap how v hits the residual
-    without re-extracting; `apply_span` is the trailing-position width for the
-    last/replace modes. Coefficient units differ by mode (clamp sets a component
-    VALUE, add scales a direction), so each mode wants its own Cs.
+    (add | clamp | add_last | replace_last) to swap how v hits the residual without
+    re-extracting; `apply_span` is the trailing width for the last/replace modes.
 
-    Pass `rubric` (a 0-9 rating question about the steered axis) to add the
-    quantitative readout: per C, the model thinks then answers a JSON object and we
-    report the logprob-weighted expected digit plus a coherence gate (valid object,
-    2+2==4). ans SHOULD rise with +C and fall with -C; flat means the steer isn't
-    moving that axis; json=False means the steer broke the model (see rubric_score)."""
+    Pass `rubric` + `readout` (DIGIT for a 0-9 rating, YESNO for a binary dilemma) to add
+    the quantitative readout AND to drive the edge search: per C the model thinks then
+    answers, and we report the readout value + the coherence signals (rep, ans_mass)."""
     if apply_mode is not None:
         vec = Vector(dataclasses.replace(vec.cfg, apply_mode=apply_mode,
                                          apply_span=apply_span), vec.shared, vec.stacked)
+    if Cs is None:                    # auto-search the coherent range (needs a probe)
+        probe = rubric if rubric is not None else user_msg
+        Cs = steer_anchors(model, tok, vec, probe, readout=readout, budget=budget,
+                           max_new_tokens=min(max_new_tokens, 200))
+        logger.info(f"searched coherent anchors: C = {Cs}")
     prompt = chat_input(tok, user_msg)
     enc = tok(prompt, return_tensors="pt").to(model.device)
     name = getattr(model.config, "name_or_path", "model").split("/")[-1]
@@ -274,22 +331,22 @@ def show_steer(jac: Jacobian, model, tok, vec, user_msg: str, *,
             out = model.generate(**enc, max_new_tokens=max_new_tokens,
                                  pad_token_id=tok.eos_token_id)
             ans = (rubric_score(model, tok, rubric, max_new_tokens=max_new_tokens,
-                                seed=seed) if rubric is not None else None)
+                                seed=seed, readout=readout) if rubric is not None else None)
         # steer-promoted tokens: top of (steered - base), word-like only. The subtraction
         # cancels the shared "about to open <think>" prior (Okay/Here/The) so what the
         # cowsay speaks is what THIS C actually pushes up, not the reasoning boilerplate
         # the old lens_topk-at-last-position surfaced for every C. (Claude)
         if C == 0:
-            readout = "(baseline, no steer)"
+            promoted_txt = "(baseline, no steer)"
         else:
             wl = _meaningful_token_mask(tok, steered.shape[-1], steered.device)
             promoted = (steered - base).masked_fill(~wl, float("-inf")).topk(6)
-            readout = " · ".join(tok.decode([i]).strip() for i in promoted.indices.tolist())
+            promoted_txt = " · ".join(tok.decode([i]).strip() for i in promoted.indices.tolist())
         # raw decode WITH special tokens: real <think>/</think>, <|im_end|> visible,
         # nothing parsed or re-wrapped -- debuggable exactly as the model emitted it
         gen = tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=False)
         block = [f"\n--- C={C:+g} " + "-" * 60, "  steer promotes:",
-                 _cthulhu_say(readout), gen]
+                 _cthulhu_say(promoted_txt), gen]
         if ans is not None:
             # SHOULD rise with +C, fall with -C; flat => steer not moving this axis.
             # rep>=0.35 (loop) or ans_mass<0.5 (didn't commit to an answer) => distrust it.
