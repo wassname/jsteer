@@ -135,8 +135,11 @@ def rubric_score(model, tok, rubric: str, *, max_new_tokens: int, seed: int,
 
 @torch.no_grad()
 def coherent_edge(model, tok, vec, probe: str, *, readout: dict = DIGIT, sign: int = 1,
-                  max_C: float = 4.0, budget: int = 6, seed: int = 0,
+                  max_C: float = 1e5, budget: int = 6, seed: int = 0,
                   max_new_tokens: int = 200) -> float:
+    # max_C is a runaway safety bound only -- the edge should be set by rep breakdown, never
+    # by this cap. If a method never breaks below max_C the real limiter is `budget` (too few
+    # step-outs), which shows up as max_rep << REP_COHERENT_MAX (at_budget=False), not a cap.
     """Find the strongest coherent |C| in the `sign` direction via the Illinois method
     (bracket a coherent/incoherent pair, then modified false-position). Coherence is
     REPETITION ONLY: margin m(C) = REP_COHERENT_MAX - rep > 0 while the trace is fluent; the

@@ -63,6 +63,18 @@ Runtime is steering-lite: `with v(model, C=8): model.generate(...)`.
   Caveat: the "rep non-monotone in C" anomaly (word -0.35 rep=1.0 vs -0.70
   rep=0.34) is UNCHECKED -- read the traces qualitatively; likely a short-trace/
   seed artifact, not real.
+- OPEN (scale, blocks cross-method comparison): the coefficient C is NOT on a
+  comparable scale across methods -- each vector v has its own norm, so C=0.5 for
+  `word` != C=0.5 for `persona_pinv`. Report the scale-invariant perturbation
+  instead: rho = ||C*v|| / ||h|| (fraction of the residual-stream norm at the
+  steered layers). Until then the C*+/C*- columns are per-method, not comparable.
+  Also: `max_C` should never bind (raised to 1e5, safety only); the real search
+  limiter is `budget` (~6 evals -> Illinois edge is +-~20% of the rep budget, and
+  robust methods cap out via too-few step-outs, flagged at_budget=False). rep is
+  single-seed noisy too. So the current swing/score numbers are directionally
+  useful but NOT yet a meaningful comparable scale -- fix rho + raise budget +
+  multi-seed before trusting cross-method ranks. (min-C floor: also consider,
+  raised by wassname, TBD.)
 
 ## Style
 
