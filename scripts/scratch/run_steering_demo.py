@@ -16,7 +16,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import config  # noqa: E402  configures loguru
 import torch  # noqa: E402
-from huggingface_hub import snapshot_download  # noqa: E402
 from steering_lite import MeanDiffC, Vector  # noqa: E402
 from steering_lite.eval.edge import (  # noqa: E402
     DECEPTIVE_STATEMENTS,
@@ -24,6 +23,7 @@ from steering_lite.eval.edge import (  # noqa: E402
     HONESTY_DILEMMA,
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+from transformers.utils.hub import cached_file  # noqa: E402
 
 from jsteer import Jacobian  # noqa: E402
 from jsteer.demo import YESNO, demo_steer  # noqa: E402
@@ -47,7 +47,7 @@ if args.out.exists():
 
 started = time.time()
 MODEL = "Qwen/Qwen3.5-4B"
-model_snapshot = Path(snapshot_download(MODEL, local_files_only=True))
+model_snapshot = Path(cached_file(MODEL, "config.json", local_files_only=True)).parent
 tok = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).to("cuda").eval()
 jac = Jacobian.from_pretrained(config.LENS_REPO, filename=config.hub_lens_file(MODEL),
