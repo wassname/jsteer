@@ -8,6 +8,12 @@ description: >-
 allowed-tools: Bash(bash **/scripts/discover-servers.sh *), Bash(bash **/scripts/execute-code.sh *), Read
 ---
 
+<!-- Claude: upstream-derived skill (appears marimo-team authored; it documents
+their private marimo._code_mode agent API and ships scripts/ + reference/).
+To refresh, fetch the current agent skill from github.com/marimo-team/marimo
+and replace this directory wholesale; local edits should live in the sibling
+`marimo` skill instead. Improvement channel: retro-marimo-pair. -->
+
 marimo is a reactive Python runtime for building reproducible Python programs
 (marimo notebooks). Cells are connected by the variables they define and
 reference. Running a cell re-executes dependents in dataflow order. The active
